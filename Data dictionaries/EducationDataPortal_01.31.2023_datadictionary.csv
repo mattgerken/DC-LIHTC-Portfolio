@@ -1,0 +1,20 @@
+﻿year,variable,label,description,source
+2020,ncessch,National Center for Education Statistics (NCES) identification number,None,Common Core of Data
+2020,school_name,School name,None,Common Core of Data
+2020,state_location,State of location,None,Common Core of Data
+2020,lea_name,Local education agency name,Name of the local education agency (school district),Common Core of Data
+2020,school_level,School level,None,Common Core of Data
+2020,school_type,School type,None,Common Core of Data
+2020,charter,Charter school,None,Common Core of Data
+2020,latitude,Latitude of institution,None,Common Core of Data
+2020,longitude,Longitude of institution,None,Common Core of Data
+2015,students_chronically_absent,Chronically absent students,"A chronically absent student is a student who is absent 15 or more school days during the school year. A student is absent if he or she is not physically on school grounds and is not participating in instruction or instruction-related activities at an approved off-grounds location for the school day. Chronically absent students include students who are absent for any reason (e.g., illness, suspension, the need to care for a family member), regardless of whether absences are excused or unexcused.",The Civil Rights Data Collection
+2018,read_test_num_valid,Number of students who completed a reading or language arts assessment and for whom a proficiency level was assigned,None,EDFacts
+2018,read_test_pct_prof_midpt,Share of students scoring proficient on a reading or language arts assessment,None,EDFacts
+2018,math_test_num_valid,Number of students who completed a mathematics assessment and for whom a proficiency level was assigned,None,EDFacts
+2018,math_test_pct_prof_midpt,Share of students scoring proficient on a mathematics assessment,None,EDFacts
+2018,grad_rate_midpt,High school graduation rate,None,EDFacts
+2020,school_name,School name,None,Common Core of Data
+2020,ncessch,National Center for Education Statistics (NCES) identification number,None,Common Core of Data
+2020,school_id,School identification number (NCES),None,Common Core of Data
+2020,seasch,School identification number (state),None,Common Core of Data
