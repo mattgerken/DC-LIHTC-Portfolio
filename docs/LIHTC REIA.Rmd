@@ -1,0 +1,2554 @@
+---
+title: "DC LIHTC Portfolio Assessment"
+author: "Matt Gerken (Mayor's Office of Policy and Innovation)"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+date: "February 14th, 2023"
+---
+
+```{r MOPI, echo =  FALSE}
+knitr::include_graphics("Output/MOPI logo.png")
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r, include =  FALSE}
+
+# load packages
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(magrittr)
+library(urbnthemes)
+library(ggplot2)
+library(openxlsx)
+library(lubridate)
+library(janitor)
+library(naniar)
+library(scales)
+library(ggrepel) 
+library(stringr)
+library(utils)
+library(tidylog)
+library(rrapply)
+library(mdthemes)
+library(aws.s3)
+library(dotenv)
+library(tigris)
+library(tidycensus)
+library(sf)
+library(ggridges)
+library(skimr)
+library(stringi)
+library(gghighlight)
+#library(raster)
+
+options(scipen = 100)
+
+set_urbn_defaults(style = "print")
+
+# get DC tracts
+dc_tracts <- tracts(
+  state = "DC",
+  year = 2021,
+  progress_bar = FALSE
+) %>%
+  st_transform(crs = 6487)
+
+dc_tracts_2019 <- tracts(
+  state = "DC",
+  year = 2019,
+  progress_bar = FALSE
+) %>%
+  st_transform(crs = 6487)
+
+
+# DC blocks
+dc_blocks <- block_groups(
+  state = "DC",
+  year = 2021,
+  progress_bar = FALSE
+) %>%
+  st_transform(crs = 6487)
+
+
+dc_blocks_2019 <- block_groups(
+  state = "DC",
+  year = 2019,
+  progress_bar = FALSE
+) %>%
+  st_transform(crs = 6487)
+
+
+# dc wards
+dc_wards <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Administrative_Other_Boundaries_WebMercator/MapServer/53/query?outFields=*&where=1%3D1&f=geojson") %>%
+  st_transform(crs = 6487) %>%
+  select(WARD, NAME, GEOID, geometry)
+
+# neighborhood clusters
+neighborhood_clusters <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Administrative_Other_Boundaries_WebMercator/MapServer/17/query?outFields=*&where=1%3D1&f=geojson") %>% select(NBH_NAMES)
+
+# https://api.census.gov/data/2021/acs/acs5/profile/variables.html
+
+# get counts by race of DC tracts
+dc_pop <- get_acs(
+  geography = "tract",
+  state = "DC",
+  year = 2021,
+  variables = c(
+    Hispanic = "DP05_0071P",
+    NotHispanic = "DP05_0076P",
+    White = "DP05_0077P",
+    Black = "DP05_0078P",
+    Asian = "DP05_0080P"
+  ),
+  geometry = TRUE,
+  progress_bar = FALSE
+) %>%
+  # divide by 100
+  select(-NAME, -moe) %>%
+  mutate(estimate = estimate / 100) %>%
+  pivot_wider(
+    names_from = variable,
+    values_from = estimate
+  )
+
+# dc tracts with census 
+dc_tracts_pop <- left_join(dc_tracts, dc_pop, by = "GEOID")
+
+# 2021 RFP map - https://dcgis.maps.arcgis.com/home/item.html?id=bae0a7f863dc42b28b28e58499bfff6f
+
+aging_services <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Health_WebMercator/MapServer/0/query?outFields=*&where=1%3D1&f=geojson") %>% select(1, 2) %>%
+  mutate(type = "Aging Services") %>%
+  st_transform(crs = 6487)
+
+
+recreation_facilities <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Recreation_WebMercator/MapServer/3/query?outFields=*&where=1%3D1&f=geojson") %>% select(1,2) %>%
+  mutate(type = "Recreation Facilities") %>%
+  st_transform(crs = 6487)
+
+pcc <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Health_WebMercator/MapServer/7/query?outFields=*&where=1%3D1&f=geojson") %>% select(1, 2) %>%
+  rename(NAME = 1,
+         ADDRESS = 2) %>%
+  mutate(type = "Primary Care Center") %>%
+  st_transform(crs = 6487)
+
+library_locations <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Cultural_and_Society_WebMercator/MapServer/4/query?outFields=*&where=1%3D1&f=geojson") %>% select(NAME, ADDRESS) %>%
+  mutate(type = "Library") %>%
+  st_transform(crs = 6487)
+
+charter_schools <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Education_WebMercator/MapServer/1/query?outFields=*&where=1%3D1&f=geojson") %>% select(NAME, ADDRESS) %>%
+  mutate(type = "Charter School") %>%
+  st_transform(crs = 6487)
+
+charter_schools_big <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Education_WebMercator/MapServer/1/query?outFields=*&where=1%3D1&f=geojson") %>%
+  mutate(type = "Charter School") %>%
+  st_transform(crs = 6487) %>%
+  select(NAME, ADDRESS, LONGITUDE, LATITUDE, SCHOOL_NAM,
+         SCHOOL_ID, GRADES, type)
+
+public_schools <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Education_WebMercator/MapServer/5/query?outFields=*&where=1%3D1&f=geojson") %>% select(NAME, ADDRESS) %>%
+  mutate(type = "Public School") %>%
+  st_transform(crs = 6487)
+
+public_schools_big <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Education_WebMercator/MapServer/5/query?outFields=*&where=1%3D1&f=geojson") %>%
+  mutate(type = "Public School") %>%
+  st_transform(crs = 6487) %>%
+  filter(GRADES != "Adult") %>%
+  distinct(SCHOOL_NAM, SCHOOL_ID, .keep_all = TRUE) %>%
+  select(NAME, ADDRESS, LONGITUDE, LATITUDE, SCHOOL_NAM,
+         SCHOOL_ID, GRADES, type)
+
+# combined school dataframe
+all_schools <- rbind(public_schools_big, charter_schools_big)
+
+dc_street_car <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Transportation_WebMercator/MapServer/112/query?outFields=*&where=1%3D1&f=geojson") %>% select(LINE, STOP) %>%
+  rename(NAME = LINE,
+         ADDRESS = STOP) %>%
+  mutate(type = "DC Street Car") %>%
+  st_transform(crs = 6487)
+
+grocery_stores <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Business_Goods_and_Service_WebMercator/MapServer/4/query?outFields=*&where=1%3D1&f=geojson") %>% select(STORENAME, ADDRESS) %>%
+  rename(NAME = STORENAME) %>%
+  mutate(type = "Grocery Store") %>%
+  st_transform(crs = 6487)
+
+metro_station_entrances <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Transportation_WebMercator/MapServer/50/query?outFields=*&where=1%3D1&f=geojson") %>% select(NAME, ADDRESS) %>%
+  mutate(type = "Metro Station Entrances") %>%
+  st_transform(crs = 6487)
+
+planning_area <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Planning_Landuse_and_Zoning_WebMercator/MapServer/2/query?outFields=*&where=1%3D1&f=geojson") %>%
+  select(NAME) %>%
+  st_transform(crs = 6487)
+
+
+amenities <- aging_services %>%
+  rbind(recreation_facilities, pcc, library_locations, charter_schools,
+        public_schools, dc_street_car, grocery_stores, metro_station_entrances) %>%
+  st_transform(crs = 6487)
+
+metro_bus <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Transportation_WebMercator/MapServer/53/query?outFields=*&where=1%3D1&f=geojson") %>%
+  st_transform(crs = 6487) %>%
+  mutate(counter = row_number()) %>%
+  select(counter)
+
+erap <- read_csv("https://ui-covid-housing-risk-indicators.s3.amazonaws.com/housing_index_state_adj.csv") %>%
+  filter(state_name == "District of Columbia")
+
+# Education data 
+edp_urban <- read.csv("Data/EducationDataPortal_01.31.2023_Schools.csv") %>%
+  separate(seasch, c("code1", "SCHOOL_ID")) %>%
+  select(charter, read_test_pct_prof_midpt, math_test_pct_prof_midpt, SCHOOL_ID) %>%
+  mutate(SCHOOL_ID = as.numeric(SCHOOL_ID))
+
+AP_IB_SAT <- read.xlsx("Data/2021 DC School Report Card AP IB and SAT Metrics.xlsx", 
+                       sheet = "School Metric Scores") %>%
+  janitor::clean_names() %>%
+  filter(student_group == "All Report Card Students") %>%
+  select(school_name, school_code, metric, metric_score) %>%
+  mutate(metric_recode = case_when(metric == "AP/IB Participation" ~ "AP_IB_part",
+                                   metric == "AP/IB Performance" ~ "AB_IB_performance",
+                                   metric == "SAT College and Career Ready Benchmark" ~ "SAT_career_ready",
+                                   metric == "SAT DC Percentile" ~ "SAT_percentile")) %>%
+  select(-metric) %>%
+  pivot_wider(names_from = metric_recode, values_from = metric_score)
+
+# add in the college readiness and sat stuff here
+grad_rate_college_enroll <- read.xlsx("Data/2021 DC School Report Card Graduation and College Enrollment Metrics.xlsx", sheet = "School Metric Scores") %>%
+  janitor::clean_names() %>%
+  filter(student_group == "All Report Card Students") %>%
+  select(school_name, school_code, metric, metric_score) %>%
+  mutate(metric_recode = case_when(metric == "12-Month Postsecondary Enrollment (2018-19 Graduates)" ~ "twelve_month_enroll",
+                                   metric == "6-Month Postsecondary Enrollment (2018-19 Graduates)" ~ "6_month_enroll",
+                                   metric == "Five-Year Graduation Rate" ~ "five_yr_grad",
+                                   metric == "Four-Year Graduation Rate" ~ "four_yr_grad")) %>%
+  select(-metric) %>%
+  filter(metric_recode %in% c("twelve_month_enroll", "five_yr_grad")) %>%
+  pivot_wider(names_from = metric_recode, values_from = metric_score)
+
+# combined educ data
+educ_data_appended <- all_schools %>%
+  left_join(edp_urban, by = c("SCHOOL_ID" = "SCHOOL_ID")) %>%
+  left_join(AP_IB_SAT, by = c("SCHOOL_ID" = "school_code")) %>%
+  left_join(grad_rate_college_enroll, by = c("SCHOOL_ID" = "school_code")) %>%
+  # create score categories for each of the schools
+  mutate(read_test_pct_prof_midpt = as.numeric(read_test_pct_prof_midpt),
+         math_test_pct_prof_midpt = as.numeric(math_test_pct_prof_midpt)) %>%
+  mutate(perc_at_reading = case_when(read_test_pct_prof_midpt >= 0 & read_test_pct_prof_midpt <= 25 ~ "Less than 25%",
+                                     read_test_pct_prof_midpt > 25 & read_test_pct_prof_midpt <= 50 ~ "Between 25% and 50%",
+                                     read_test_pct_prof_midpt > 50 & read_test_pct_prof_midpt <= 75 ~ "Between 50% and 75%",
+                                     read_test_pct_prof_midpt > 75 & read_test_pct_prof_midpt <= 100 ~ "Above 75%",
+                                     is.na(read_test_pct_prof_midpt) ~ "Missing"),
+         perc_at_math = case_when(math_test_pct_prof_midpt >= 0 & math_test_pct_prof_midpt <= 25 ~ "Less than 25%",
+                                  math_test_pct_prof_midpt > 25 & math_test_pct_prof_midpt <= 50 ~ "Between 25% and 50%",
+                                  math_test_pct_prof_midpt > 50 & math_test_pct_prof_midpt <= 75 ~ "Between 50% and 75%",
+                                  math_test_pct_prof_midpt > 75 & math_test_pct_prof_midpt <= 100 ~ "Above 75%",
+                                  is.na(math_test_pct_prof_midpt) ~ "Missing"),
+         five_yr_grad = case_when(five_yr_grad == ">95%" ~ "95",
+                                  five_yr_grad == ">99%" ~ "99",
+                                  TRUE ~ five_yr_grad),
+         five_yr_grad = as.numeric(five_yr_grad),
+         five_yr_grad_recode = case_when(five_yr_grad < 50 ~ "Less than 50%",
+                                         five_yr_grad >= 50 & five_yr_grad < 75 ~ "Between 50% and 75%",
+                                         five_yr_grad >= 75 ~ "Above 75%",
+                                         is.na(five_yr_grad) ~ "Missing"),
+         enroll_recode = case_when(twelve_month_enroll < 50 ~ "Less than 50%",
+                                   twelve_month_enroll >= 50 & twelve_month_enroll < 75 ~ "Between 50% and 75%",
+                                   twelve_month_enroll >= 75 ~ "Above 75%",
+                                   is.na(twelve_month_enroll) ~ "Missing")) 
+
+
+# AFFH data (block group for school quality index)
+affh_school <- read.csv("Data/AFFH_blockgroup_AFFHT0006_July2020.csv") %>%
+  janitor::clean_names() %>%
+  filter(state_name == "District of Columbia") %>%
+  select(geoid, schl_idx) %>%
+  rename(GEOID = geoid) %>%
+  mutate(GEOID = as.character(GEOID))
+
+# prep the block group merge
+dc_blocks_2019_AFFH <- left_join(dc_blocks_2019, affh_school, by = "GEOID")
+
+# other affh data 
+affh_other <- read.csv("Data/AFFH_tract_AFFHT0006_July2020.csv") %>%
+  janitor::clean_names() %>%
+ # filter(state_name == "District of Columbia") %>%
+  select(geoid, pov_idx:trans_idx) %>%
+  rename(GEOID = geoid) %>%
+  mutate(GEOID = as.character(GEOID))
+
+dc_tracts_affh <- left_join(dc_tracts, affh_other, by = "GEOID")
+
+dc_tracts_2019_affh <- left_join(dc_tracts_2019, affh_other, by = "GEOID")
+
+# square boundaries
+square_boundaries <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Property_and_Land_WebMercator/MapServer/41/query?outFields=*&where=1%3D1&f=geojson", type = 3) %>%
+  st_transform(crs = 6487) %>%
+  janitor::clean_names() %>%
+  select(square, suffix) %>%
+  mutate(suffix = case_when(is.na(suffix) ~ "None",
+                            TRUE ~ suffix),
+         type = st_is_valid(geometry)) %>%
+  filter(type == TRUE)
+
+# tax extract
+taxes <- read.csv("Data/ITSPE_view_2098036548347357834.csv") %>%
+  janitor::clean_names() %>%
+  select(square, suffix, lot, assessment) %>%
+  filter(assessment != 0,
+         !is.na(assessment)) %>%
+  group_by(square, suffix) %>%
+  summarize(assessment = sum(assessment)) %>%
+  ungroup() %>%
+  mutate(suffix = case_when(suffix == "" ~ "None",
+                            TRUE ~ suffix))
+
+# combine
+assessment_data <- square_boundaries %>%
+  left_join(taxes, by = c("square", "suffix")) %>%
+  filter(!is.na(assessment))
+
+```
+
+```{r spatial equity, include =  FALSE}
+
+# download data and use Urban spatial equity tool. 
+
+lihtc <- read.csv("Data/HUD LIHTC database extract 12-13-2022.csv") %>%
+  mutate(LI_UNITS = case_when(
+    !is.na(LI_UNITS) ~ LI_UNITS,
+    # if total units is not null and low income units is null
+    # impute with total units value
+    !is.na(N_UNITS) & is.na(LI_UNITS) ~ N_UNITS))
+
+#write.csv(lihtc, "Clean/lihtc_clean.csv")
+
+# how many units will be filtered out since they have missing lat/lon info?
+# lihtc %>%
+#   filter(is.na(LATITUDE) | is.na(LONGITUDE)) %>%
+#   summarize(LI_UNITS = sum(LI_UNITS),
+#             count = n()) %>%
+#   View()
+
+
+lihtc_nomissing <- lihtc %>%
+  filter(!is.na(LATITUDE) | !is.na(LONGITUDE))
+
+lihtc_for_merge <- lihtc_nomissing %>%
+  mutate(proj_add_adj = gsub(",","",PROJ_ADD),
+         proj_add_adj = stri_replace_all_regex(proj_add_adj,
+                                               pattern = c(" STREET", " AVENUE", " COURT", " DRIVE", " ROAD", 
+                                                           " PLACE", " LANE", " TERRACE", " STREETNE"),
+                                               replacement = c(" ST", " AVE", " CT", " DR", " RD", " PL",
+                                                               " LN", " TER", " STREET NE"),
+                                               vectorize = FALSE),
+         # create a unique id for purposes of data viz later, starting at a bigger number
+         unique_2 = row_number() + 200)
+  
+
+lihtc_nomissing <- st_as_sf(lihtc_nomissing, coords = c("LONGITUDE", "LATITUDE")) 
+
+lihtc_nomissing <- lihtc_nomissing %>%
+  st_set_crs(4326) %>% 
+  st_transform(crs = 6487)
+  
+
+# dc tracts with LIHTC appended
+dc_tracts_lihtc <-st_join(dc_tracts, lihtc_nomissing, join = st_intersects) 
+
+# dc tracts with LIHTC and ERAP appended
+dc_tracts_lihtc_erap <- dc_tracts_lihtc %>%
+  st_drop_geometry() %>%
+  mutate(LI_dev = if_else(!is.na(LI_UNITS), 1, 0)) %>%
+  group_by(GEOID) %>%
+  summarize(LI_dev = sum(LI_dev),
+            LI_UNITS = sum(LI_UNITS)) %>%
+  left_join(erap, by = c('GEOID' = 'GEOID')) %>%
+  filter(!is.na(state_name))
+
+# dc wards and LIHTC
+dc_wards_lihtc <-st_join(dc_wards, lihtc_nomissing, join = st_intersects) 
+
+dc_blocks_lihtc <- st_join(dc_blocks_2019, lihtc_nomissing, join = st_intersects)
+
+# quick ward tally
+tally <- dc_wards_lihtc %>%
+  st_drop_geometry() %>%
+  group_by(NAME) %>%
+  summarize(LI_UNITS = sum(LI_UNITS))
+
+# TOPA data 
+housing_insights <- read.csv("Data/projects.csv") %>%
+  janitor::clean_names() %>%
+  select(latitude, longitude, mar_id, proj_addre, proj_units_tot,
+         sum_appraised_value_current_impr, sum_appraised_value_current_land,
+         sum_appraised_value_current_total, topa_count, xcoord, ycoord)
+
+topa <- housing_insights %>%
+  filter(topa_count > 0) %>%
+  mutate(proj_addre = str_to_upper(proj_addre),
+         unique = row_number()) %>%
+  separate(proj_addre, into=c("addr1", "addr2", "addr3", "addr4"), sep = "; ")
+
+topa_long <- topa %>%
+  pivot_longer(
+    cols = addr1:addr4,
+    names_to = "id",
+    values_to = "value"
+  ) %>%
+  filter(!is.na(value) & value != "OTHERS") %>%
+  mutate(proj_add_adj = stri_replace_all_regex(value,
+                                               pattern = c(" STREET", " AVENUE", " COURT", " DRIVE", " ROAD", 
+                                                           " PLACE", " LANE", " TERRACE", " STREETNE"),
+                                               replacement = c(" ST", " AVE", " CT", " DR", " RD", " PL",
+                                                               " LN", " TER", " STREET NE"),
+                                               vectorize = FALSE)) 
+
+# do a full join to do overlay
+lihtc_topa_overlay <- lihtc_for_merge %>%
+  full_join(topa_long, by = c("proj_add_adj" = "proj_add_adj")) %>%
+  mutate(flag = if_else(!is.na(unique) & !is.na(HUD_ID), 1, 0)) %>%
+  group_by(unique) %>%
+  mutate(merge_type = max(flag)) %>%
+  ungroup() %>%
+  mutate(unique = as.numeric(unique),
+         unique_2 = as.numeric(unique_2)) %>%
+  mutate(unique3 = case_when(is.na(unique) ~ unique_2,
+                             !is.na(unique) ~ unique)) %>%
+  distinct(unique3, merge_type, .keep_all = TRUE) %>%
+  mutate(point_type = case_when(!is.na(unique) & !is.na(unique_2) ~ "LIHTC and TOPA",
+                                is.na(unique) & !is.na(unique_2) ~ "LIHTC only",
+                                !is.na(unique) & is.na(unique_2) ~ "TOPA only"),
+         LATITUDE = case_when(is.na(LATITUDE) ~ latitude,
+                              !is.na(LATITUDE) ~ LATITUDE),
+         LONGITUDE = case_when(is.na(LONGITUDE) ~ longitude,
+                               !is.na(LONGITUDE) ~ LONGITUDE),
+         LI_UNITS = case_when(is.na(LI_UNITS) ~ proj_units_tot,
+                              !is.na(LI_UNITS) ~ LI_UNITS),
+         point_type = factor(point_type, levels = c("LIHTC only", "TOPA only", 
+                                                    "LIHTC and TOPA"))) 
+
+lihtc_topa_overlay <- st_as_sf(lihtc_topa_overlay, coords = c("LONGITUDE", "LATITUDE")) 
+
+lihtc_topa_overlay <- lihtc_topa_overlay %>%
+  st_set_crs(4326) %>% 
+  st_transform(crs = 6487)
+
+# add wards in
+lihtc_topa_ward <-st_join(lihtc_topa_overlay, dc_wards, join = st_intersects) 
+
+# add LIHTC to assessment data 
+assessment_data_lihtc <- st_join(assessment_data, lihtc_nomissing, join = st_intersects)
+
+assessment_data_lihtc <- assessment_data_lihtc %>%
+  mutate(LIHTC = if_else(!is.na(HUD_ID), 1, 0)) %>%
+  distinct(square, suffix, assessment, LIHTC, .keep_all = TRUE) %>%
+  select(square, suffix, assessment, LIHTC)
+
+# finally add in wards 
+assessment_data_lihtc_Ward <- st_join(assessment_data_lihtc, dc_wards, join = st_intersects)
+
+
+```
+
+# Introduction
+
+This analysis considers DC's LIHTC portfolio (available through HUD's LIHTC database).
+
+* **Replicating Chicago's racial equity impact assessment**: I started by replicating Figures 1-3 and Table 2 of Chicago's racial equity impact assessment of its LIHTC portfolio. These figures map LIHTC developments against the share of neighborhood (census tract) residents of different racial/ethnic identities (Black non-Hispanic, White non-Hispanic, and Hispanic.)
+
+* **Supplementary analysis of DC's LIHTC portfolio**: I ran a few additional analyses of DC's LIHTC portfolio, including a timeline (1988-2019) of when LIHTC units in the District were placed into service with a specific breakout by Ward, and location of LIHTC developments relative to the prioritization they are given by Urban Institute's Emergency Rental Assistance Priority (ERAP) Index.
+
+* **Co-Location of LIHTC with neighborhood amenities**: I overlayed DC's LIHTC portfolio with the 2021 RFP map with the location of various amenities. I show the number of neighborhood amenities by planning area and Ward, for census tracts with and without LIHTC, and the number of amenities within a quarter mile (5-minute walk) and half mile (10-minute walk) of LIHTC developments. I also calculated the minimum distance of each LIHTC development to each neighborhood amenity type and also added in a visual for DC Metro bus stops.
+
+* **Urban Institute Spatial Equity Data Tool**: I uploaded the DC LIHTC portfolio data to Urban Institute's Spatial Equity Data Tool to determine the demographic and spatial distribution of LIHTC units relative to the broader District.
+
+This entire analysis removes 198 LIHTC units (representing 6 developments) that had missing geographic information.
+
+# Replicating Chicago's Racial Equity Impact Analysis
+
+Figures 1-3 below replicate Figures 1-3 of [Chicago's racial equity impact assessment (REIA)](https://www.chicago.gov/content/dam/city/depts/doh/qap/qap_2021/draft_reia_qap.pdf).
+
+* The majority of LIHTC developments are located in census tracts (neighborhoods) with higher shares of residents who are Black non-Hispanic and lower shares of residents who are White non-Hispanic or Hispanic. 
+
+```{r figures 1-3, echo =  FALSE}
+
+set_urbn_defaults(style = "map")
+
+# FIGURE 1: LIHTC units allocated 2000-2020 by % White residents
+
+fig1 <- ggplot() +
+  geom_sf(data = dc_tracts_pop, aes(fill = White)) + 
+  scale_fill_gradientn(
+    labels = scales::percent_format(),
+    name = "Percent White\nnon-Hispanic"
+  ) + 
+  geom_sf(data = dc_wards, color = "white", fill = "transparent", size = 1.5) + 
+  geom_sf(
+    data = lihtc_nomissing,
+    # Size bubbles by number of LIHTC units
+    aes(size = LI_UNITS),
+    fill = palette_urbn_main["green"],
+    color = "black",
+    # Adjust transparency for readability
+    alpha = 0.5,
+    shape = 21
+  ) + 
+  guides(size = guide_legend("LIHTC units")) + 
+  theme(legend.direction = "vertical", legend.box = "vertical",
+        plot.caption = element_text(hjust = 0),
+        legend.title = element_text(face = "bold")) + 
+  ggtitle("Figure 1. LIHTC Units by Share White Non-Hispanic Residents") + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, 2017-2021 ACS 5-year estimates")) 
+
+fig1
+
+# FIGURE 2: LIHTC units allocated 2000-2020 by % Black residents
+
+fig2 <- ggplot() +
+  geom_sf(data = dc_tracts_pop, aes(fill = Black)) + 
+  scale_fill_gradientn(
+    labels = scales::percent_format(),
+    name = "Percent Black\nnon-Hispanic",
+    colors = palette_urbn_magenta,
+    limits = c(0,1)
+  ) + 
+  geom_sf(data = dc_wards, color = "white", fill = "transparent", size = 1.5) + 
+  geom_sf(
+    data = lihtc_nomissing,
+    # Size bubbles by number of LIHTC units
+    aes(size = LI_UNITS),
+    fill = palette_urbn_main["green"],
+    color = "black",
+    # Adjust transparency for readability
+    alpha = 0.5,
+    shape = 21
+  ) + 
+  guides(size = guide_legend("LIHTC units")) + 
+  theme(legend.direction = "vertical", legend.box = "vertical",
+        plot.caption = element_text(hjust = 0),
+        legend.title = element_text(face = "bold")) + 
+  ggtitle("Figure 2. LIHTC Units by Share Black Non-Hispanic Residents") + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, 2017-2021 ACS 5-year estimates")) 
+
+fig2
+
+
+# FIGURE 3: LIHTC units allocated 2000-2020 by % Latinx residents
+fig3 <- ggplot() +
+  geom_sf(data = dc_tracts_pop, aes(fill = Hispanic)) + 
+  scale_fill_gradientn(
+    labels = scales::percent_format(),
+    name = "Percent Hispanic",
+    colors = palette_urbn_gray
+  ) + 
+  geom_sf(data = dc_wards, color = "white", fill = "transparent", size = 1.5) + 
+  geom_sf(
+    data = lihtc_nomissing,
+    # Size bubbles by number of LIHTC units
+    aes(size = LI_UNITS),
+    fill = palette_urbn_main["green"],
+    color = "black",
+    # Adjust transparency for readability
+    alpha = 0.5,
+    shape = 21
+  ) + 
+  guides(size = guide_legend("LIHTC units")) + 
+  theme(legend.direction = "vertical", legend.box = "vertical",
+        plot.caption = element_text(hjust = 0),
+        legend.title = element_text(face = "bold")) + 
+  ggtitle("Figure 3. LIHTC Units by Share Hispanic Residents") + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, 2017-2021 ACS 5-year estimates")) 
+
+fig3
+
+```
+
+The figure below focuses in on just those census tracts that have at least one LIHTC development. It maps the number of LIHTC units in the census tract against the share of residents in the census tract who identify as Black non-Hispanic (the larger the circle, the greater the number of individual LIHTC developments/properties where those units are housed).
+
+* There is an upward trend - among those neighborhoods that have LIHTC, neighborhoods with a higher share of residents who identify as Black non-Hispanic also tend to have a larger number of LIHTC units.
+
+* There is a large clustering of LIHTC developments in neighborhoods where the share of residents who identify as Black non-Hispanic is between 75% and 100%.
+
+```{r fig4, echo =  FALSE}
+
+set_urbn_defaults(style = "print")
+
+# scatterplots
+scatter_data <- dc_tracts_lihtc %>%
+  st_drop_geometry() %>%
+  mutate(LI_dev = if_else(!is.na(LI_UNITS), 1, 0)) %>%
+  group_by(GEOID) %>%
+  summarize(LI_dev = sum(LI_dev),
+            LI_UNITS = sum(LI_UNITS)) %>%
+  ungroup() %>%
+  left_join(dc_pop, by = "GEOID") %>%
+  filter(LI_dev != 0)
+
+fignew <- scatter_data %>%
+  ggplot(mapping = aes(x = Black, y = LI_UNITS)) +
+  ggplot2::geom_point(mapping = aes(size = LI_dev), alpha = 0.3) +
+  scale_x_continuous(expand = expand_scale(mult = c(0.002, 0)), 
+                     limits = c(0, 1.02),
+                     breaks = 0:4 * 0.25,
+                     labels = scales::percent) +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.002)),
+                     limits = c(-5, 1510),
+                     breaks = 0:5 * 300,
+                     labels = scales::comma) +
+  scale_radius(range = c(3, 15),
+               breaks = c(1, 2, 4, 6),
+               labels = c("1", "2-3", "4-5", "6")) +
+  labs(x = "Percent Black non-Hispanic",
+       y = "Number of LIHTC units") +
+  scatter_grid() +
+  geom_smooth(method=lm, se=FALSE, size=1, alpha = 0.5, color = "#1696d2",
+              linetype = "dashed") + 
+  guides(size = guide_legend("LIHTC developments")) +
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        legend.title = element_text(face = "bold"),
+        plot.caption = element_text(hjust = 0)) + 
+  ggtitle("Figure 4 Census Tracts with LIHTC (by Percent Black Non-Hispanic)") + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, 2017-2021 ACS 5-year estimates")) 
+
+
+fignew
+
+```
+
+The graphic below shows the number of LIHTC units that exist by Ward. 
+
+* 60% of DC's LIHTC units are located in Wards 7 and 8.
+
+* The third-highest Ward (Ward 1) has 12% of DC's LIHTC units.
+
+* There are no LIHTC units in Ward 3.
+
+
+```{r wards, echo =  FALSE}
+
+ward_chart <- tally %>%
+  mutate_at(vars(LI_UNITS), ~replace_na(.,0)) %>%
+  mutate(NAME2 = NAME) %>%
+  ggplot(mapping= aes(x = NAME, y = LI_UNITS)) + 
+  geom_col() + 
+  geom_text(mapping = aes(label = scales::comma(LI_UNITS)), vjust = -1) +    
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1))) +
+  labs(x = NULL,
+       y = NULL) +
+  remove_ticks() +
+  remove_axis() +
+  theme(plot.caption = element_text(hjust = 0)) + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database")) + 
+  ggtitle("Figure 5 Number of LIHTC Units by Ward")
+
+ward_chart
+
+```
+
+The figure below replicates Table 2 from Chicago's racial equity impact assessment. It identifies which racial/ethnic group represents the majority in each census tract (neighborhood) in DC (Black non-Hispanic majority tracts, Hispanic majority tracts, and White non-Hispanic majority tracts). It then determines whether neighborhoods with LIHTC have over- or under-representation for each racial/ethnic majority group.
+
+* LIHTC is **over-represented** in Black non-Hispanic majority census tracts by 29 percentage points. 47% of DC's census tracts are majority Black non-Hispanic and 76% of DC's active LIHTC units are located in majority Black non-Hispanic census tracts.
+
+* LIHTC is just slightly over-represented in Hispanic majority census tracts. 2% of DC's census tracts are majority Hispanic and 4% of DC's active LIHTC units are located in majority Hispanic tracts.
+
+* LIHTC is **under-represented** in White non-Hispanic majority census tracts by 31 percentage points. 50% of DC's census tracts are majority White non-Hispanic and 20% of DC's LIHTC units are located in majority White non-Hispanic tracts.
+
+
+```{r fig6, echo =  FALSE}
+
+# FIGURE 6: Percent of LIHTC units by majority racial/ethnic composition
+
+dc_tracts_lihtc_pop <- dc_tracts_lihtc %>%
+  st_drop_geometry() %>%
+  group_by(GEOID) %>%
+  summarize(LI_UNITS = sum(LI_UNITS)) %>%
+  ungroup() %>%
+  left_join(dc_pop, by = "GEOID") %>%
+  mutate(max = pmax(Hispanic, White, Black, Asian),
+         majority = case_when(Hispanic == max ~ "Hispanic Majority Tracts",
+                              White == max ~ "White Non-Hispanic Majority Tracts",
+                              Black == max ~ "Black Non-Hispanic Majority Tracts",
+                              Asian == max ~ "Asian Majority Tracts"))
+
+# create the tables
+dataframe1 <- dc_tracts_lihtc_pop %>%
+  filter(!is.na(LI_UNITS)) %>%
+  group_by(majority) %>%
+  summarize(LI_UNITS = sum(LI_UNITS)) %>%
+  mutate(percent = LI_UNITS / sum(LI_UNITS),
+         type = "Share of all LIHTC units") %>%
+  select(-LI_UNITS)
+
+dataframe2 <- dc_tracts_lihtc_pop %>%
+  count(majority) %>%
+  mutate(percent = n / sum(n),
+         type = "Share of all DC tracts") %>%
+  select(-n)
+
+
+# column chart 
+set_urbn_defaults(style = "print")
+
+fig6 <- dataframe1 %>%
+  rbind(dataframe2) %>%
+  ggplot(mapping = aes(majority, y = percent, fill = factor(type))) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)),
+                     labels = scales::percent, 
+                     limits = c(0, 0.8)) +
+  labs(x = NULL,
+       y = NULL) +  
+  remove_ticks() + 
+  ggtitle("Figure 6. Representation of LIHTC in Majority Race and Ethnicity Census Tracts") + 
+  theme(plot.caption = element_text(hjust = 0)) + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, 2017-2021 ACS 5-year estimates")) 
+
+fig6
+
+
+```
+
+# Supplementary Analysis of DC's LIHTC Portfolio
+
+The HUD LIHTC database documents, for each LIHTC development, the year it was placed in service as well as whether it was a new construction project, an acquisition and rehab project, or both (some developments had missing information).
+
+* There are about 25,000 active LIHTC units in DC (figure 7 makes it look more like 24,000, but I removed from that figure LIHTC developments with missing year placed in service information).
+
+* The majority of LIHTC units are acquisiton and rehab.
+
+* DC's LIHTC portfolio has seen continued growth since the early 2000s.
+
+
+```{r line, echo =  FALSE}
+
+data <- lihtc_nomissing %>%
+  filter(YR_PIS != 8888) %>%
+  mutate(type_cat = case_when(TYPE == 1 ~ "New construction",
+                              TYPE == 2 ~ "Acquisition and rehab",
+                              TYPE == 3 ~ "Both new construction and acquisiton and rehab",
+                              TYPE == 4 ~ "Existing",
+                              is.na(TYPE) ~ "Missing type information")) %>%
+  st_drop_geometry() %>% 
+  group_by(YR_PIS, type_cat) %>%
+  summarize(LI_UNITS = sum(LI_UNITS)) %>%
+  ungroup() %>%
+  arrange(type_cat, YR_PIS) %>%
+  group_by(type_cat) %>%
+  mutate(cum_sum = cumsum(LI_UNITS),
+         YR_PIS = as.integer(YR_PIS)) %>%
+  ungroup() 
+
+temp1 <- c("Acquisition and rehab", "Both new construction and acquisiton and rehab",
+           "Missing type information", "New construction")
+temp2 <- seq(1988, 2019, by=1)
+
+repeat_temp1 <- rep(temp1, length(temp2))
+repeat_temp2 <- sort(rep(temp2, length(temp1)))
+ 
+holder_temp <- cbind(repeat_temp1, repeat_temp2)
+holder_temp <- data.frame(holder_temp) %>%
+  rename(type_cat = repeat_temp1,
+         YR_PIS = repeat_temp2) %>%
+  mutate(YR_PIS = as.numeric(YR_PIS))
+
+linegraph <- holder_temp %>%
+  left_join(data, by = c('type_cat' = 'type_cat', 'YR_PIS' = 'YR_PIS')) %>%
+  arrange(type_cat, YR_PIS) %>%
+  group_by(type_cat) %>%
+  tidyr::fill(cum_sum) %>%
+  ungroup() %>%
+  mutate_at(vars(cum_sum), ~replace_na(.,0))%>%
+  ggplot(aes(x = YR_PIS, y = cum_sum, fill = type_cat)) +
+  geom_area(position = "stack") +
+  scale_x_continuous(expand = expand_scale(mult = c(0, 0)),
+                     limits = c(1988, 2019),
+                     breaks = c(1988, 1990, 1995, 2000, 2005, 2010, 2015, 2019)) +  
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.2)), 
+                     labels = scales::comma,
+                     limits = c(0, 25000),
+                     breaks = 0:5 * 5000) +
+  labs(x = NULL,
+       y = "Total LIHTC units",
+       caption = "Source: HUD LIHTC database\nNote: Excludes LIHTC developments missing the year they were placed in service.") + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  scale_fill_discrete(labels = function(x) str_wrap(x, width = 24)) + 
+  ggtitle("Figure 7. Cumulative Active LIHTC Units by Type")
+
+  
+linegraph
+
+```
+
+The following figure seeks to understand the timing of when LIHTC units were brought on by Ward. 
+
+* Compared with other Wards, less of the LIHTC activity in Wards 1, 7, and 8 have been in recent years (e.g., since 2011).
+
+* Alternatively, the majority of LIHTC activity in Wards 2, 4, and 6 has been since 2011.
+
+* The majority of the LIHTC activity in Ward 8 occurred before 2006.
+
+```{r wards time, echo =  FALSE}
+
+ward_time_chart <- dc_wards_lihtc %>%
+  st_drop_geometry() %>%
+  filter(YR_PIS != 8888,
+         NAME != "Ward 3") %>%
+  mutate(time_cat = case_when(YR_PIS >= 1988 & YR_PIS <= 2000 ~ "1988-2000",
+                              YR_PIS >= 2001 & YR_PIS <= 2005 ~ "2001-2005",
+                              YR_PIS >= 2006 & YR_PIS <= 2010 ~ "2006-2010",
+                              YR_PIS >= 2011 & YR_PIS <= 2015 ~ "2011-2015",
+                              YR_PIS >= 2016 & YR_PIS <= 2019 ~ "2016-2019")) %>%
+  group_by(NAME, time_cat) %>%
+  summarize(LI_UNITS = sum(LI_UNITS)) %>%
+  ungroup() %>%
+  group_by(NAME) %>%
+  mutate(percent = LI_UNITS / sum(LI_UNITS)) %>%
+  ungroup() %>%
+  ggplot() + 
+  geom_col(mapping= aes(x = NAME, y = percent, fill = forcats::fct_rev(time_cat))) + 
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)),
+                     labels = scales::percent) +
+  labs(x = NULL,
+       y = NULL) +
+  remove_ticks() +
+  labs(caption = "Source: HUD LIHTC database\nNote: Excludes Ward 3 since there are no LIHTC developments in that Ward.") + 
+  ggtitle("Figure 8. Share of LIHTC Units Added to Each Ward by Time Period") + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0))
+
+ward_time_chart
+
+```
+
+To inform an equitable COVID-19 response, the Urban Institute developed the [Emergency Rental Assistance Priority (ERAP) Index](https://www.urban.org/features/where-prioritize-emergency-rental-assistance-keep-renters-their-homes) to help communities target rental assistance and other resources to those areas at greatest risk of housing instability and homelessness. Their census tract-level tool is composed of an overall index and three subindexes:
+
+* **Overall Index**: Weights the Housing Instability Risk Subindex by 50%, the COVID-19 Impact Subindex by 10%, and the Equity Subindex by 40%.
+
+* **Housing Instability Risk Subindex**: Informed by shares of (1) people living in poverty, (2) renter-occupied housing units, (3) severely cost-burdened low-income renters, (4) severely overcrowded households, and (5) unemployed people.
+
+* **COVID-19 Impact Subindex**: Informed by shares of (1) adults without health insurance and (2) low-income jobs lost to COVID-19.
+
+* **Equity Subindex**: Informed by shares of (1) people of color, (2) extremely low-income renter households, (3) households receiving public assistance, and (4) people born outside the US.
+
+For the overall index and each subindex, each census tract is assigned a percentile that is relative to its state. The higher the percentile, the higher the prioritization the tool gives to that area for emergency rental assistance and other resources. If a census tract is in the 95th percentile for the Overall Index, for example, its index value is higher than the values of 95% of the tracts in its state.
+
+I overlayed the Urban ERAP Index with the DC LIHTC data to understand the prioritization the neighborhoods LIHTC units are located would be given. I grouped the percentiles using the same categories Urban defined - (1) 0 to 49th percentiles as the lowest priority, (2) 50th to 74th percentiles, (3) 75th to 84th percentiles, (4) 85th to 89 percentiles, (5) 90th to 94th percentiles, and (6) the 95th to 99th percentiles as the highest priority.
+
+* More than half of LIHTC units in DC are located in "high priority" neighborhoods - census tracts in the 75th percentile or above for the Overall Index (darkest four shades of blue).
+
+* 15% of LIHTC units are in the highest priority neighborhoods - census tracts in the top 10% for the Overall Index (darkest two shades of blue).
+
+```{r erap, echo =  FALSE}
+
+erap_stacked <- dc_tracts_lihtc_erap %>%
+  filter(!is.na(LI_UNITS)) %>%
+  mutate(tot_cat = case_when(total_index_quantile >= 0 & total_index_quantile <= 0.49 ~ "0th - 49th percentiles",
+                             total_index_quantile >= 0.5 & total_index_quantile <= 0.74 ~ "50th - 74th percentiles",
+                             total_index_quantile >= 0.75 & total_index_quantile <= 0.84 ~ "75th - 84th percentiles",
+                             total_index_quantile >= 0.85 & total_index_quantile <= 0.89 ~ "85th - 89th percentiles",
+                             total_index_quantile >= 0.9 & total_index_quantile <= 0.94 ~ "90th - 94th percentiles",
+                             total_index_quantile >= 0.95 & total_index_quantile <= 0.99 ~ "95th - 99th percentiles"),
+         housing_cat = case_when(housing_index_quantile >= 0 & housing_index_quantile <= 0.49 ~ "0th - 49th percentiles",
+                             housing_index_quantile >= 0.5 & housing_index_quantile <= 0.74 ~ "50th - 74th percentiles",
+                             housing_index_quantile >= 0.75 & housing_index_quantile <= 0.84 ~ "75th - 84th percentiles",
+                             housing_index_quantile >= 0.85 & housing_index_quantile <= 0.89 ~ "85th - 89th percentiles",
+                             housing_index_quantile >= 0.9 & housing_index_quantile <= 0.94 ~ "90th - 94th percentiles",
+                             housing_index_quantile >= 0.95 & housing_index_quantile <= 0.99 ~ "95th - 99th percentiles"),
+         covid_cat = case_when(covid_index_quantile >= 0 & covid_index_quantile <= 0.49 ~ "0th - 49th percentiles",
+                             covid_index_quantile >= 0.5 & covid_index_quantile <= 0.74 ~ "50th - 74th percentiles",
+                             covid_index_quantile >= 0.75 & covid_index_quantile <= 0.84 ~ "75th - 84th percentiles",
+                             covid_index_quantile >= 0.85 & covid_index_quantile <= 0.89 ~ "85th - 89th percentiles",
+                             covid_index_quantile >= 0.9 & covid_index_quantile <= 0.94 ~ "90th - 94th percentiles",
+                             covid_index_quantile >= 0.95 & covid_index_quantile <= 0.99 ~ "95th - 99th percentiles"),
+         equity_cat = case_when(equity_index_quantile >= 0 & equity_index_quantile <= 0.49 ~ "0th - 49th percentiles",
+                             equity_index_quantile >= 0.5 & equity_index_quantile <= 0.74 ~ "50th - 74th percentiles",
+                             equity_index_quantile >= 0.75 & equity_index_quantile <= 0.84 ~ "75th - 84th percentiles",
+                             equity_index_quantile >= 0.85 & equity_index_quantile <= 0.89 ~ "85th - 89th percentiles",
+                             equity_index_quantile >= 0.9 & equity_index_quantile <= 0.94 ~ "90th - 94th percentiles",
+                             equity_index_quantile >= 0.95 & equity_index_quantile <= 0.99 ~ "95th - 99th percentiles")) %>%
+  select(GEOID, LI_UNITS, tot_cat:equity_cat) %>%
+  pivot_longer(
+    cols = tot_cat:equity_cat,
+    names_to = "id",
+    values_to = "value"
+  ) %>%
+  group_by(id, value) %>%
+  summarize(LI_UNITS = sum(LI_UNITS)) %>%
+  ungroup() %>%
+  group_by(id) %>%
+  mutate(percent = LI_UNITS / sum(LI_UNITS)) %>%
+  ungroup() %>%
+  mutate(name = case_when(id == "tot_cat" ~ "Overall Index",
+                          id == "housing_cat" ~ "Housing Instability Risk Subindex",
+                          id == "covid_cat" ~ "COVID-19 Impact Subindex",
+                          id == "equity_cat" ~ "Equity Subindex")) %>%
+  ggplot() + 
+  geom_col(mapping= aes(x = name, y = percent, fill = forcats::fct_rev(value))) + 
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)),
+                     labels = scales::percent) +
+  labs(x = NULL,
+       y = NULL) +
+  remove_ticks() +
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, Urban Institute Emergency Rental Assistance Priority (ERAP) Index")) +
+  ggtitle("Figure 9. Share of LIHTC Units by ERAP Index Prioritization") + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 20)) +
+  scale_fill_manual(values = c("#0a4c6a", "#12719e", "#1696d2", "#46abdb", 
+                               "#73bfe2", "#cfe8f3"))
+
+erap_stacked
+
+```
+
+# Co-Location of LIHTC with Neighborhood Amenities
+
+The [2021 RFP map](https://dcgis.maps.arcgis.com/apps/instant/nearby/index.html?appid=e21d7c3f307c4f3a8a5aeb0b52d93e71&sliderDistance=0.25) shows the location of the following transit and neighborhood amenities in DC:
+
+* Aging services
+* Recreation facilities
+* Primary care centers
+* Libraries
+* Charter schools
+* Public schools
+* DC Street Car
+* Grocery stores
+* Metro station entrances
+
+Figure 10 and Figure 11 show the number of amenities of each type for DC Comprehensive Plan Planning Areas and Wards. 
+
+* Planning areas have a similar number of total neighborhood amenities, with a somewhat lower number in the Lower Anacostia Waterfront and Near Southwest planning area compared to others.
+
+* Wards also have a similar number of total neighborbood amenities, with somewhat lower numbers in Ward 3.
+
+```{r figure 10 11, echo =  FALSE}
+
+# planning areas by amenities
+planning_amenities <- st_join(planning_area, amenities, join = st_intersects) %>%
+  mutate(NAME.x = str_to_title(NAME.x)) %>%
+  st_drop_geometry() %>%
+  count(NAME.x, type) %>%
+  ggplot() +
+  geom_col(mapping = aes(x = NAME.x, y = n, fill = type)) +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)),
+                     limits = c(0, 120),
+                     breaks = 0:6 * 20) +
+  labs(x = NULL,
+       y = NULL) +  
+  coord_flip() + 
+  guides(color = FALSE) + 
+  scale_fill_manual(values = c("#1696d2", "#d2d2d2", "#000000", "#fdbf11", "#ec008b",
+                               "#55b748", "#5c5859", "#db2b27", "#52307c")) + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 26)) + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  labs(caption = bquote(bold("Source:")~"2021 RFP map")) +
+  ggtitle("Figure 10. Extent of Neighborhood Amenities by Planning Area")
+  
+
+planning_amenities
+
+# repeat but using wards
+wards_amenities <- st_join(dc_wards, amenities, join = st_intersects) %>%
+  st_drop_geometry() %>%
+  count(NAME.x, type) %>%
+  ggplot() +
+  geom_col(mapping = aes(x = NAME.x, y = n, fill = type)) +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)),
+                     limits = c(0, 125),
+                     breaks = 0:5 * 25) +
+  labs(x = NULL,
+       y = NULL) +  
+  coord_flip() + 
+  guides(color = FALSE) + 
+  scale_fill_manual(values = c("#1696d2", "#d2d2d2", "#000000", "#fdbf11", "#ec008b",
+                               "#55b748", "#5c5859", "#db2b27", "#52307c")) + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 26)) + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  labs(caption = bquote(bold("Source:")~"2021 RFP map")) +
+  ggtitle("Figure 11. Extent of Neighborhood Amenities by Ward")
+  
+wards_amenities
+
+```
+
+Figure 12 compares the number of amenities between census tracts (neighborhoods) with at least one LIHTC development to census tracts without LIHTC. The raincloud plot has three components, from left to right:
+
+1. A dotplot, counting the number of census tracts with the given number of total neighborhood amenities on the y-axis
+
+2. A boxplot, in blue, which shows the 25th percentile (bottom of the box), the median (horizontal line in the middle of the box), and the 75th percentile (top of the box)
+
+3. A histogram, with the distribution of total neighborhood amenities (peaks represent a larger number of census tracts than lower points)
+
+Figure 12 shows:
+
+* As a group, census tracts (neighborhoods) with LIHTC tends to have slightly more neighborhood amenities (median = 4) than census tracts without LIHTC (median = 2).
+
+* Three census tracts with LIHTC have no neighborhood amenities within their neighborhood border.
+
+* Two census tracts with LIHTC have more than 10 neighborhood amenities within their neighborhood border.
+
+
+```{r fig12, echo =  FALSE}
+
+# count of amenities, census tracts with LIHTC versus those without LIHTC
+tract_amenity_count <- dc_tracts_lihtc %>%
+  mutate(LI_dev = if_else(!is.na(LI_UNITS), 1, 0)) %>%
+  group_by(GEOID) %>%
+  summarize(LI_dev = sum(LI_dev),
+            LI_UNITS = sum(LI_UNITS)) %>%
+  ungroup() %>%
+  mutate(tract_type = if_else(LI_dev > 0, "Census Tracts with LIHTC", "Census Tracts without LIHTC")) %>%
+  st_join(amenities, join = st_intersects) %>%
+  st_drop_geometry() %>%
+  count(GEOID, tract_type, type) %>%
+  rename(count = n) %>%
+  ungroup() %>%
+  mutate(amenity_count = case_when(!is.na(type) ~ count)) %>%
+  mutate_at(vars(amenity_count), ~replace_na(.,0)) %>%
+  group_by(GEOID, tract_type) %>%
+  summarize(amenity_count = sum(amenity_count)) %>%
+  ggplot(mapping = aes(x = tract_type, y = amenity_count)) +
+  ggdist::stat_halfeye(adjust = 0.5, justification = -.3, point_color = NA, width = 0.3) + 
+  geom_boxplot(width = 0.1, outlier.shape = NA) + 
+  ggdist::stat_dots(side = "left", justification = 1.1, dotsize = 0.5) + 
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)),
+                     limits = c(-1, 26),
+                     breaks = c(0, 5, 10, 15, 20, 25)) + 
+  labs(title = "Figure 12. Total Neighborhood Amenities in Census Tracts With and Without LIHTC",
+       x = NULL,
+       y = "Total neighborhood amenities") +
+  theme(plot.caption = element_text(hjust = 0)) + 
+  labs(caption = bquote(bold("Source:")~"2021 RFP map, HUD LIHTC database"))
+
+tract_amenity_count
+
+
+```
+
+
+Figures 13 and 14 show the number of amenities surrounding LIHTC developments that are within walking distance - figure 13 for a quarter mile (about a 5-minute walk) and figure 14 for a half mile (about a 10-minute walk).
+
+Starting first with the quarter mile findings in Figure 13:
+
+* 50% or more of LIHTC developments are **not** within a 5-minute walk of aging services, a grocery store, a library, a Metro station entrance, a primary care center, or a recreation facility.
+
+* In particular, just 1 of 4 LIHTC developments is within a 5-minute walk of a library or metro station entrance.
+
+* Among the different amenities, LIHTC developments are most co-located with public schools - two-thirds of LIHTC developments are within a 5-minute walk of at least one public school.
+
+
+```{r next1, echo =  FALSE}
+
+# draw a (1) 1/4 mile radius and then a (2) 1/2 mile radius around each lihtc development 
+# and count the number of amenities of each type. Maybe do a centroid comparison for non-lihtc
+# census tracts
+
+buffer_distance_quarter_mile <- units::set_units(.25, "mile")
+buffer_distance_quarter_mile <- buffer_distance_quarter_mile %>%
+  units::set_units("meters")
+
+buffer_distance_half_mile <- units::set_units(.5, "mile")
+buffer_distance_half_mile <- buffer_distance_half_mile %>%
+  units::set_units("meters")
+
+quarter_mile <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_join(amenities, st_is_within_distance, dist = buffer_distance_quarter_mile) %>%
+  st_drop_geometry() %>%
+  group_by(HUD_ID, type) %>%
+  summarize(tally = n()) %>%
+  ungroup() %>%
+  filter(!is.na(type))
+
+
+half_mile <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_join(amenities, st_is_within_distance, dist = buffer_distance_half_mile) %>%
+  st_drop_geometry() %>%
+  group_by(HUD_ID, type) %>%
+  summarize(tally = n()) %>%
+  ungroup() %>%
+  filter(!is.na(type))
+
+# create a fake dataset
+x <- lihtc_nomissing %>%
+  select(HUD_ID) %>%
+  st_drop_geometry()
+
+list1 <- x$HUD_ID
+y <- c("Aging Services", "Recreation Facilities", "Primary Care Center", 
+       "Library", "Charter School", "Public School", "DC Street Car", "Grocery Store",
+       "Metro Station Entrances")
+
+repeat_list1 <- rep(list1, length(y))
+repeat_y <- rep(y, length(list1))
+
+holder <- cbind(repeat_list1, repeat_y)
+holder <- data.frame(holder) %>%
+  rename(HUD_ID = repeat_list1,
+         type = repeat_y)
+
+# main dataframes 
+dframe <- holder %>%
+  left_join(quarter_mile, 
+            by = c('HUD_ID' = 'HUD_ID', 'type' = 'type')) %>%
+  mutate_at(vars(tally), ~replace_na(.,0))
+
+hframe <- holder %>%
+  left_join(half_mile, 
+            by = c('HUD_ID' = 'HUD_ID', 'type' = 'type')) %>%
+  mutate_at(vars(tally), ~replace_na(.,0))
+
+# try boxplot
+# boxplot_quarter_mile <- dframe
+#   ggplot(mapping =  aes(x = type, y = tally)) +
+#   geom_boxplot() +
+#   scale_y_continuous(expand = expand_scale(mult = c(0, 0.2))) +
+#   labs(x = "Amenity Type",
+#        y = "Count") +
+#   remove_ticks() + 
+#   scale_x_discrete(labels = function(x) str_wrap(x, width = 15))
+# 
+# boxplot_quarter_mile
+# 
+# 
+# # subsetted strip chart instead
+# strip_quarter_mile <- holder %>%
+#   left_join(quarter_mile, 
+#             by = c('HUD_ID' = 'HUD_ID', 'type' = 'type')) %>%
+#   mutate_at(vars(tally), ~replace_na(.,0)) %>%
+#   ggplot(aes(x = tally, y = type)) +
+#   geom_point(alpha = 0.2, size = 5) +
+#   scale_x_continuous(expand = expand_scale(mult = c(0.002, 0)), 
+#                      limits = c(0, 8), 
+#                      breaks = 0:4 * 2) +  
+#   labs(title = "Total Sleep Time of Different Mammals by Diet",
+#        x = "Count",
+#        y = NULL) +
+#   theme(axis.ticks.y = element_blank())
+# 
+# strip_quarter_mile
+
+# stacked column might be better (1/4 mile)
+stacked_quarter_mile <- dframe %>%
+  mutate(cat = case_when(tally == 0 ~ "0",
+                         tally == 1 ~ "1", 
+                         tally == 2 ~ "2", 
+                         tally == 3 ~ "3",
+                         tally >= 4 ~ "4-7")) %>%
+  count(HUD_ID, type, cat) %>%
+  ggplot() +
+  geom_bar(mapping = aes(x = type, fill = forcats::fct_rev(cat)), position = "fill") +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)),
+                     labels = scales::percent) +
+  labs(x = NULL,
+       y = NULL) +  
+  remove_ticks() +
+  guides(color = FALSE) + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 12)) + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        legend.title = element_text(face = "bold"),
+        plot.caption = element_text(hjust = 0)) + 
+  labs(caption = bquote(bold("Source:")~"2021 RFP map, HUD LIHTC database")) +
+  ggtitle("Figure 13. Share of LIHTC Developments within 1/4 Mile of Given Number\nof Neighborhood Amenities") + 
+  scale_fill_manual(values = c("#ec008b", "#fdbf11", "#000000", "#d2d2d2", "#1696d2"),
+                    name = "Number of\namenities")
+
+stacked_quarter_mile
+
+
+```
+
+Increasing the distance from a quarter mile to a half mile, Figure 14 shows:
+
+* The majority of LIHTC developments are within at least one amenity of each type when considering a 10-minute walk, with the exception of libraries.
+
+* Slightly less than half of LIHTC developments are **not** within a 10-minute walk of a Metro station entrance.
+
+* The high count of charter schools (the larger pink bar) seems to be attributed to counting the same school multiple times in the underlying data.
+
+
+```{r next2, echo =  FALSE}
+
+# half mile
+stacked_half_mile <- hframe %>%
+  mutate(cat = case_when(tally == 0 ~ "0",
+                         tally == 1 ~ "1", 
+                         tally == 2 ~ "2", 
+                         tally == 3 ~ "3",
+                         tally >= 4 ~ "4-19")) %>%
+  count(HUD_ID, type, cat) %>%
+  ggplot() +
+  geom_bar(mapping = aes(x = type, fill = forcats::fct_rev(cat)), position = "fill") +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)),
+                     labels = scales::percent) +
+  labs(x = NULL,
+       y = NULL) +  
+  remove_ticks() +
+  guides(color = FALSE) + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 12)) + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        legend.title = element_text(face = "bold"),
+        plot.caption = element_text(hjust = 0)) + 
+  labs(caption = bquote(bold("Source:")~"2021 RFP map, HUD LIHTC database")) +
+  ggtitle("Figure 14. Share of LIHTC Developments within 1/2 Mile of Given Number\nof Neighborhood Amenities") + 
+  scale_fill_manual(values = c("#ec008b", "#fdbf11", "#000000", "#d2d2d2", "#1696d2"),
+                    name = "Number of\namenities")
+
+stacked_half_mile
+
+
+```
+
+For each LIHTC development, I also determined the minimum distance to each type of neighborbood amenity, in miles.
+
+* LIHTC developments are closest to charter schools, public schools, aging services, and recreational facilities.
+
+* They tend to be farthest from libraries and Metro station entrances.
+
+```{r mindis, echo =  FALSE}
+
+# find minimum distance
+
+mindist_aging <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(aging_services) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Aging Services",
+         min_dist = min_dist * 0.00062137)
+
+mindist_recreation <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(recreation_facilities) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Recreation Facilities",
+         min_dist = min_dist * 0.00062137)
+
+mindist_pcc <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(pcc) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Primary Care Center",
+         min_dist = min_dist * 0.00062137)
+
+
+mindist_library <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(library_locations) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Library",
+         min_dist = min_dist * 0.00062137)
+
+
+mindist_charter <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(charter_schools) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Charter Schools",
+         min_dist = min_dist * 0.00062137)
+
+
+mindist_public <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(public_schools) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Public Schools",
+         min_dist = min_dist * 0.00062137)
+
+mindist_dcstreet <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(dc_street_car) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "DC Street Car",
+         min_dist = min_dist * 0.00062137)
+
+mindist_grocery <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(grocery_stores) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Grocery Stores",
+         min_dist = min_dist * 0.00062137)
+
+mindist_metro_station <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(metro_station_entrances) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Metro Station Entrances",
+         min_dist = min_dist * 0.00062137)
+
+mindist_combo <- mindist_aging %>%
+  rbind(mindist_recreation, mindist_pcc, mindist_library, mindist_charter,
+        mindist_public, mindist_grocery, mindist_metro_station) %>%
+  mutate(dist_type = case_when(min_dist < 0.25 ~ "Less than 1/4 mile",
+                               min_dist >= 0.25 & min_dist < 0.5 ~ "Between 1/4 and 1/2 mile",
+                               min_dist >= 0.5 & min_dist < 0.75 ~ "Between 1/2 and 3/4 mile",
+                               min_dist >=0.75 & min_dist < 1 ~ "Between 3/4 and 1 mile",
+                               min_dist >= 1 & min_dist < 1.5 ~ "Between 1 and 1.5 miles",
+                               min_dist >= 1.5 ~ "Greater than 1.5 miles"),
+         dist_type = factor(dist_type, levels = c("Less than 1/4 mile", "Between 1/4 and 1/2 mile",
+                                                  "Between 1/2 and 3/4 mile", 
+                                                  "Between 3/4 and 1 mile",
+                                                  "Between 1 and 1.5 miles",
+                                                  "Greater than 1.5 miles"))) %>%
+  ggplot() +
+  geom_bar(mapping = aes(x = type, fill = forcats::fct_rev(dist_type)), position = "fill") +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)), labels = scales::percent) +
+  labs(x = "Neighborhood amenities",
+       y = NULL) +  
+  remove_ticks() +
+  guides(color = FALSE) + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 12)) + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  labs(caption = bquote(bold("Source:")~"2021 RFP map, HUD LIHTC database")) + 
+  scale_fill_manual(values = c("#55b748", "#ec008b", "#fdbf11", "#000000", "#d2d2d2", "#1696d2")) + 
+  ggtitle("Figure 15. Minimum Distance of LIHTC Developments to Neighborhood Amenities")
+
+
+mindist_combo
+
+```
+
+
+Dr. Hewitt had mentioned ORE's access to bus indicator:
+
+* Access to Bus: areas within ¼-mile walking distance of bus stops with bus frequencies of 10 minutes or better during peak and midday
+
+For each LIHTC development, I counted the number of bus stops within a 1/4 mile walking distance. 
+
+* The median number of bus stops within a LIHTC development is 15.
+
+* All LIHTC developments have at least some bus stops within a 1/4 mile walking distance (the minimum is 3 bus stops.)
+
+* 17 LIHTC developments are within a 1/4 mile of 25+ bus stops.
+
+
+```{r bus, echo =  FALSE}
+
+# bus stops
+
+quarter_mile_bus <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_join(metro_bus, st_is_within_distance, dist = buffer_distance_quarter_mile) %>%
+  st_drop_geometry() %>%
+  group_by(HUD_ID) %>%
+  summarize(tally = n()) %>%
+  ungroup()
+
+bus_viz <- quarter_mile_bus %>%
+  ggplot(mapping = aes(tally)) + 
+  geom_histogram() +
+  scale_x_continuous(expand = expand_scale(mult = c(0.002, 0)), 
+                     limits = c(0, NA),
+                     breaks = c(0, 5, 10, 15, 20, 25, 30)) +
+    scale_y_continuous(expand = expand_scale(mult = c(0, 0.2))) +
+  labs(x = "Number of bus stops",
+       y = "Number of LIHTC developments") + 
+  theme(plot.caption = element_text(hjust = 0)) + 
+  labs(caption = bquote(bold("Source:")~"Open Data DC, HUD LIHTC database")) + 
+  ggtitle("Figure 16. Number of Bus Stops within a 1/4 Mile of LIHTC Developments")
+
+
+bus_viz
+
+```
+
+
+
+# Urban Institute Spatial Equity Data Tool
+
+Urban Institute created a Spatial Equity Data Tool to help government agencies, policymakers, and community advocates understand demographic and spatial inequities in their data. I uploaded the DC LIHTC data to this tool, which created two graphics.
+
+The first graphic shows the **demographic distribution** of the DC LIHTC data compared with the total DC population. Blue dots mean the particular demographic group is *over-represented* in the DC LIHTC data compared with the DC total population; red dots mean the demographic group is *under-represented*. 
+
+According to the tool, the following groups are over-represented in DC’s LIHTC portfolio compared with the entire District:
+
+* Black residents (non-Latinx)
+* Residents with low incomes
+* Renters
+* Residents with extremely low incomes
+* Households without internet access
+* Residents who are unemployed
+* Cost-burdened renter households
+* Children under the age of 18
+* Residents with less than a high school diploma
+* Residents with disabilities
+* Residents without insurance
+
+The following groups are under-represented in DC’s LIHTC portfolio compared with the entire District: 
+
+* Asian residents (non-Latinx)
+* Seniors over the age of 64
+* Latinx residents
+* Residents with a bachelor’s degree
+* White residents (non-Latinx)
+
+```{r spatial1, echo =  FALSE}
+knitr::include_graphics("Output/spatial_equity_demographic_distribution.png")
+```
+
+The second graphic shows the **geographic distribution** of the DC LIHTC data compared with the total DC population. The disparity score shows which census tracts are *over-represented* in the DC LIHTC data compared with the total population in the District (shades of blue) and which are *under-represented* (shades of orange/red). 
+
+* Most of DC’s LIHTC portfolio is located in Wards 7 and 8, with some in Wards 1 and 6 as well.
+
+```{r spatial2, echo =  FALSE}
+knitr::include_graphics("Output/spatial_equity_disparity_map.png")
+```
+
+**Using Urban's Spatial Equity Data Tool**
+
+The tool is interactive and provides additional comparisons beyond what I have included in this email (for example, instead of the total District population, you can compare to those with extremely low incomes or with children). The geographic distribution graphic (graphic #2) also includes a toggle that allows you to pull in the overall DC population comparison as well. Here are the steps for using the tool if you wanted to explore that as well:
+
+1. Go [here](https://apps.urban.org/features/equity-data-tool/#user-city)
+2. Upload the CSV attachment from the email containing this output file, which is the DC LIHTC data I downloaded and cleaned from the HUD LIHTC database
+3. Keep the longitude and latitude choices
+4. Click “Advanced options”
+5. Click “Weight data”
+6. Choose “LI_UNITS” as the weight column (the tool uses the number of LIHTC units for weighting in the analysis)
+7. Click “Save”
+8. Click “Run analysis”
+
+# Follow-up Analysis
+
+As a follow-up to the January 20th meeting, I have added the following analyses to this document.
+
+* Housing type of LIHTC units (new construction, rehab, acquisition) by Ward
+
+* Housing type of LIHTC units by Ward over time
+
+* Co-location of LIHTC with Tenant Opportunity to Purchase Act (TOPA)
+
+* Proximity of LIHTC to schools by school quality
+
+* Other outcomes/indicators
+
+* Land value
+
+* Proposed overnight bus routes
+
+## Housing Type by Ward
+
+* The within-Ward share of LIHTC units that is new construction is greatest in Wards 2 and 7.
+
+* The share that is acquisition and rehab is greatest for Ward 1.
+
+```{r wards type, echo =  FALSE}
+
+ward_type_chart <- dc_wards_lihtc %>%
+  st_drop_geometry() %>%
+  filter(YR_PIS != 8888,
+         NAME != "Ward 3") %>%
+  mutate(time_cat = case_when(YR_PIS >= 1988 & YR_PIS <= 2000 ~ "1988-2000",
+                              YR_PIS >= 2001 & YR_PIS <= 2005 ~ "2001-2005",
+                              YR_PIS >= 2006 & YR_PIS <= 2010 ~ "2006-2010",
+                              YR_PIS >= 2011 & YR_PIS <= 2015 ~ "2011-2015",
+                              YR_PIS >= 2016 & YR_PIS <= 2019 ~ "2016-2019"),
+         type_cat = case_when(TYPE == 1 ~ "New construction",
+                              TYPE == 2 ~ "Acquisition and rehab",
+                              TYPE == 3 ~ "Both new construction and acquisiton and rehab",
+                              TYPE == 4 ~ "Existing",
+                              is.na(TYPE) ~ "Missing type information")) %>%
+  group_by(NAME, type_cat) %>%
+  summarize(LI_UNITS = sum(LI_UNITS)) %>%
+  ungroup() %>%
+  group_by(NAME) %>%
+  mutate(percent = LI_UNITS / sum(LI_UNITS)) %>%
+  ungroup() %>%
+  ggplot() + 
+  geom_col(mapping= aes(x = NAME, y = percent, fill = forcats::fct_rev(type_cat))) + 
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)),
+                     labels = scales::percent) +
+  labs(x = NULL,
+       y = NULL) +
+  remove_ticks() +
+  labs(caption = "Source: HUD LIHTC database\nNote: Excludes Ward 3 since there are no LIHTC developments in that Ward.") + 
+  ggtitle("Figure 17. Share of LIHTC Units In Each Ward by Type") + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  scale_fill_manual(values = c("#fdbf11", "#000000", "#d2d2d2", "#1696d2"))
+
+ward_type_chart
+
+```
+
+## Housing Type by Ward Over Time
+
+* I turned Figure 17 into an examination of each Ward's LIHTC portfolio, by type, over time.
+
+
+```{r line newer, echo =  FALSE}
+
+data_ward <- dc_wards_lihtc %>%
+  filter(YR_PIS != 8888,
+         NAME != "Ward 3") %>%
+  mutate(type_cat = case_when(TYPE == 1 ~ "New construction",
+                              TYPE == 2 ~ "Acquisition and rehab",
+                              TYPE == 3 ~ "Both new construction and acquisiton and rehab",
+                              TYPE == 4 ~ "Existing",
+                              is.na(TYPE) ~ "Missing type information")) %>%
+  st_drop_geometry() %>% 
+  group_by(YR_PIS, type_cat, NAME) %>%
+  summarize(LI_UNITS = sum(LI_UNITS)) %>%
+  ungroup() %>%
+  arrange(NAME, type_cat, YR_PIS) %>%
+  group_by(NAME, type_cat) %>%
+  mutate(cum_sum = cumsum(LI_UNITS),
+         YR_PIS = as.integer(YR_PIS)) %>%
+  ungroup() 
+
+temp1 <- c("Acquisition and rehab", "Both new construction and acquisiton and rehab",
+           "Missing type information", "New construction")
+temp2 <- seq(1988, 2019, by=1)
+temp3 <- c("Ward 1", "Ward 2", "Ward 4", "Ward 5", "Ward 6", "Ward 7", "Ward 8")
+
+repeat_temp1 <- rep(temp1, length(temp2))
+repeat_temp2 <- sort(rep(temp2, length(temp1)))
+
+holder_temp <- cbind(repeat_temp1, repeat_temp2)
+holder_temp <- data.frame(holder_temp)
+
+repeat_temp3 <- sort(rep(temp3, length(repeat_temp2)))
+
+repeat_holder_temp <- holder_temp[rep(seq_len(nrow(holder_temp)), 7), ]
+
+holder_temp_ward <- cbind(repeat_temp3, repeat_holder_temp)
+
+holder_temp_ward <- data.frame(holder_temp_ward) %>%
+  rename(ward = repeat_temp3,
+         type_cat = repeat_temp1,
+         YR_PIS = repeat_temp2) %>%
+  mutate(YR_PIS = as.numeric(YR_PIS))
+
+linegraph_ward_data <- holder_temp_ward %>%
+  left_join(data_ward, by = c('type_cat' = 'type_cat', 'YR_PIS' = 'YR_PIS', 'ward' = 'NAME')) %>%
+  arrange(ward, type_cat, YR_PIS) %>%
+  group_by(ward, type_cat) %>%
+  tidyr::fill(cum_sum) %>%
+  ungroup() %>%
+  mutate_at(vars(cum_sum), ~replace_na(.,0))
+
+
+ward1 <- linegraph_ward_data %>%
+  filter(ward == "Ward 1") %>%
+  ggplot(aes(x = YR_PIS, y = cum_sum, fill = type_cat)) +
+  geom_area(position = "stack") +
+  scale_x_continuous(expand = expand_scale(mult = c(0, 0)),
+                     limits = c(1988, 2019),
+                     breaks = c(1988, 1990, 1995, 2000, 2005, 2010, 2015, 2019)) +  
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.2)), 
+                     labels = scales::comma,
+                     limits = c(0, 10000),
+                     breaks = 0:10 * 1000) +
+  labs(x = NULL,
+       y = "Total LIHTC units",
+       caption = "Source: HUD LIHTC database\nNote: Excludes LIHTC developments missing the year they were placed in service.") + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  scale_fill_discrete(labels = function(x) str_wrap(x, width = 24)) + 
+  ggtitle("Figure 18a. Ward 1's Portfolio Over Time")
+
+
+ward2 <- linegraph_ward_data %>%
+  filter(ward == "Ward 2") %>%
+  ggplot(aes(x = YR_PIS, y = cum_sum, fill = type_cat)) +
+  geom_area(position = "stack") +
+  scale_x_continuous(expand = expand_scale(mult = c(0, 0)),
+                     limits = c(1988, 2019),
+                     breaks = c(1988, 1990, 1995, 2000, 2005, 2010, 2015, 2019)) +  
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.2)), 
+                     labels = scales::comma,
+                     limits = c(0, 10000),
+                     breaks = 0:10 * 1000) +
+  labs(x = NULL,
+       y = "Total LIHTC units",
+       caption = "Source: HUD LIHTC database\nNote: Excludes LIHTC developments missing the year they were placed in service.") + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  scale_fill_discrete(labels = function(x) str_wrap(x, width = 24)) + 
+  ggtitle("Figure 18b. Ward 2's Portfolio Over Time")
+
+ward4 <- linegraph_ward_data %>%
+  filter(ward == "Ward 4") %>%
+  ggplot(aes(x = YR_PIS, y = cum_sum, fill = type_cat)) +
+  geom_area(position = "stack") +
+  scale_x_continuous(expand = expand_scale(mult = c(0, 0)),
+                     limits = c(1988, 2019),
+                     breaks = c(1988, 1990, 1995, 2000, 2005, 2010, 2015, 2019)) +  
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.2)), 
+                     labels = scales::comma,
+                     limits = c(0, 10000),
+                     breaks = 0:10 * 1000) +
+  labs(x = NULL,
+       y = "Total LIHTC units",
+       caption = "Source: HUD LIHTC database\nNote: Excludes LIHTC developments missing the year they were placed in service.") + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  scale_fill_discrete(labels = function(x) str_wrap(x, width = 24)) + 
+  ggtitle("Figure 18c. Ward 4's Portfolio Over Time")
+
+ward5 <- linegraph_ward_data %>%
+  filter(ward == "Ward 5") %>%
+  ggplot(aes(x = YR_PIS, y = cum_sum, fill = type_cat)) +
+  geom_area(position = "stack") +
+  scale_x_continuous(expand = expand_scale(mult = c(0, 0)),
+                     limits = c(1988, 2019),
+                     breaks = c(1988, 1990, 1995, 2000, 2005, 2010, 2015, 2019)) +  
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.2)), 
+                     labels = scales::comma,
+                     limits = c(0, 10000),
+                     breaks = 0:10 * 1000) +
+  labs(x = NULL,
+       y = "Total LIHTC units",
+       caption = "Source: HUD LIHTC database\nNote: Excludes LIHTC developments missing the year they were placed in service.") + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  scale_fill_discrete(labels = function(x) str_wrap(x, width = 24)) + 
+  ggtitle("Figure 18d. Ward 5's Portfolio Over Time")
+
+ward6 <- linegraph_ward_data %>%
+  filter(ward == "Ward 6") %>%
+  ggplot(aes(x = YR_PIS, y = cum_sum, fill = type_cat)) +
+  geom_area(position = "stack") +
+  scale_x_continuous(expand = expand_scale(mult = c(0, 0)),
+                     limits = c(1988, 2019),
+                     breaks = c(1988, 1990, 1995, 2000, 2005, 2010, 2015, 2019)) +  
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.2)), 
+                     labels = scales::comma,
+                     limits = c(0, 10000),
+                     breaks = 0:10 * 1000) +
+  labs(x = NULL,
+       y = "Total LIHTC units",
+       caption = "Source: HUD LIHTC database\nNote: Excludes LIHTC developments missing the year they were placed in service.") + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  scale_fill_discrete(labels = function(x) str_wrap(x, width = 24)) + 
+  ggtitle("Figure 18e. Ward 6's Portfolio Over Time")
+
+ward7 <- linegraph_ward_data %>%
+  filter(ward == "Ward 7") %>%
+  ggplot(aes(x = YR_PIS, y = cum_sum, fill = type_cat)) +
+  geom_area(position = "stack") +
+  scale_x_continuous(expand = expand_scale(mult = c(0, 0)),
+                     limits = c(1988, 2019),
+                     breaks = c(1988, 1990, 1995, 2000, 2005, 2010, 2015, 2019)) +  
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.2)), 
+                     labels = scales::comma,
+                     limits = c(0, 10000),
+                     breaks = 0:10 * 1000) +
+  labs(x = NULL,
+       y = "Total LIHTC units",
+       caption = "Source: HUD LIHTC database\nNote: Excludes LIHTC developments missing the year they were placed in service.") + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  scale_fill_discrete(labels = function(x) str_wrap(x, width = 24)) + 
+  ggtitle("Figure 18f. Ward 7's Portfolio Over Time")
+
+ward8 <- linegraph_ward_data %>%
+  filter(ward == "Ward 8") %>%
+  ggplot(aes(x = YR_PIS, y = cum_sum, fill = type_cat)) +
+  geom_area(position = "stack") +
+  scale_x_continuous(expand = expand_scale(mult = c(0, 0)),
+                     limits = c(1988, 2019),
+                     breaks = c(1988, 1990, 1995, 2000, 2005, 2010, 2015, 2019)) +  
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.2)), 
+                     labels = scales::comma,
+                     limits = c(0, 10000),
+                     breaks = 0:10 * 1000) +
+  labs(x = NULL,
+       y = "Total LIHTC units",
+       caption = "Source: HUD LIHTC database\nNote: Excludes LIHTC developments missing the year they were placed in service.") + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  scale_fill_discrete(labels = function(x) str_wrap(x, width = 24)) + 
+  ggtitle("Figure 18g. Ward 8's Portfolio Over Time")
+
+
+ward1
+ward2
+ward4
+ward5
+ward6
+ward7
+ward8
+
+```
+
+## Co-Location of LIHTC and TOPA
+
+I read in TOPA data from [Housing Insights](http://housinginsights.org/) and overlayed TOPA properties with LIHTC properties.
+
+* In addition to having the most LIHTC units, Wards 7 and 8 also have the largest number of TOPA units.
+
+* Wards 1 and 8 have the greatest extent of co-location between the LIHTC and TOPA programs.
+
+
+```{r topa, echo =  FALSE}
+
+set_urbn_defaults(style = "map")
+
+# FIGURE: location of LIHTC and TOPA
+
+fig_topa <- ggplot() +
+  geom_sf(data = dc_tracts, color = "black", fill = "transparent") + 
+  geom_sf(data = dc_wards, color = "black", fill = "transparent", size = 1.25) + 
+  geom_sf(
+    data = lihtc_topa_overlay,
+    # Size bubbles by number of LIHTC units
+    aes(size = LI_UNITS, 
+        fill = point_type),
+    #fill = palette_urbn_main["green"],
+    color = "black",
+    # Adjust transparency for readability
+    alpha = 0.5,
+    shape = 21
+  ) + 
+  guides(size = guide_legend("Number of units"),
+         fill = guide_legend(NULL, override.aes = list(size = 5))) + 
+  theme(legend.direction = "vertical", legend.box = "vertical",
+        plot.caption = element_text(hjust = 0),
+        legend.title = element_text(face = "bold")) + 
+  ggtitle("Figure 19. Location of LIHTC and TOPA properties") + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, Housing Insights TOPA data")) 
+
+fig_topa
+
+```
+
+```{r topa ward, echo =  FALSE}
+
+set_urbn_defaults(style = "print")
+
+lihtc_topa_ward_bar <- lihtc_topa_ward %>%
+  st_drop_geometry() %>%
+  group_by(NAME, point_type) %>%
+  summarize(LI_UNITS = sum(LI_UNITS)) %>%
+  ungroup()
+
+fig_topa_lihtc_bar <- lihtc_topa_ward_bar %>%
+  mutate(point_type = factor(point_type, levels = c("LIHTC and TOPA", "TOPA only", "LIHTC only"))) %>%  
+  ggplot() +
+  geom_col(mapping = aes(x = NAME, y = LI_UNITS, fill = forcats::fct_rev(point_type))) +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)),
+                     labels = scales::comma) +
+  labs(x = NULL,
+       y = "Number of units") +  
+  remove_ticks() +
+  guides(color = FALSE) + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  labs(caption = "Source: HUD LIHTC database, Housing Insights\nNote: Ward 3 has 20 TOPA only units.") + 
+  ggtitle("Figure 20. Breakdown of LIHTC and TOPA by Ward")
+
+fig_topa_lihtc_bar
+
+```
+
+## School Quality
+
+Historically, measuring school quality [has largely](https://www.urban.org/urban-wire/going-beyond-test-scores-measure-school-quality) been limited to achievement on test scores. In recent times, there has been a push to bring in measures that provide a more holistic understanding of school quality, such as by incorporating measures of student engagement, content knowledge, physical health and well-being, postsecondary outcomes, college and career readiness, deeper learning skills, and civic engagement. Localities are are different stages of bringing in these measures.
+
+That said, I use four measures of school quality that come from three data sources (HUD's July 2020 AFFH data, Urban Institute's Education Data Portal, and OSSE's 2021 DC School Report Card):
+
+1. **Affirmatively Furthering Fair Housing (AFFH) School Proficiency Index**: A block group-level index that uses school-level data on the performance of 4th grade students on state exams to describe which neighborhoods have high-performing elementary schools nearby and which are near lower performing elementary schools. The higher the score, the higher the quality of the surrounding school system. 
+
+2. **Share of students scoring proficient on language arts/math assessments**: A school-level share of students scoring proficient on a reading/language arts assessment and on a mathematics assessment (2018 data from Urban Institute's Education Data Portal).
+
+3. **High school graduation rate**: A school-level five-year graduation rate (OSSE 2021 DC School Report Card).
+
+4. **Post-secondary enrollment rate of high school graduates**: A school-level 12-month postsecondary enrollment rate of 2018-2019 high school graduates (OSSE 2021 DC Report Card).
+
+Note that schools have varying levels of missing data for measures 2 through 4 - for each analysis, schools with missing data are removed.
+
+
+Starting first with the AFFH school proficiency index (which is measured for block groups):
+
+* LIHTC units are generally located in areas with a lower AFFH school proficiency index score (meaning they are closer to lower-performing elementary schools and to higher-performing elementary schools).
+
+
+```{r affh_school, echo =  FALSE}
+
+set_urbn_defaults(style = "map")
+
+# FIGURE 20: LIHTC units allocated 2000-2020 by school quality
+
+fig_affh_school <- ggplot() +
+  geom_sf(data = dc_blocks_2019_AFFH, aes(fill = schl_idx)) + 
+  scale_fill_gradientn(
+    name = "School Quality Index",
+    limits = c(0,100),
+    na.value = "#dcdbdb"
+  ) + 
+  geom_sf(data = dc_wards, color = "white", fill = "transparent", size = 1.5) + 
+  geom_sf(
+    data = lihtc_nomissing,
+    # Size bubbles by number of LIHTC units
+    aes(size = LI_UNITS),
+    fill = palette_urbn_main["green"],
+    color = "black",
+    # Adjust transparency for readability
+    alpha = 0.5,
+    shape = 21
+  ) + 
+  guides(size = guide_legend("LIHTC units")) + 
+  theme(legend.direction = "vertical", legend.box = "vertical",
+        plot.caption = element_text(hjust = 0),
+        legend.title = element_text(face = "bold")) + 
+  ggtitle("Figure 21. LIHTC Units by AFFH School Quality Index") + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, July 2020 AFFH data, 2019 block group boundaries"))
+
+fig_affh_school
+
+```
+
+
+```{r affh scatter, echo =  FALSE}
+
+set_urbn_defaults(style = "print")
+
+# scatterplots
+scatter_data_school_AFFH <- dc_blocks_lihtc %>%
+  st_drop_geometry() %>%
+  mutate(LI_dev = if_else(!is.na(LI_UNITS), 1, 0)) %>%
+  group_by(GEOID) %>%
+  summarize(LI_dev = sum(LI_dev),
+            LI_UNITS = sum(LI_UNITS)) %>%
+  ungroup() %>%
+  left_join(affh_school, by = "GEOID") %>%
+  filter(LI_dev != 0,
+         !is.na(schl_idx))
+
+fignew_affh <- scatter_data_school_AFFH %>%
+  ggplot(mapping = aes(x = schl_idx, y = LI_UNITS)) +
+  ggplot2::geom_point(mapping = aes(size = LI_dev), alpha = 0.3) +
+  scale_x_continuous(expand = expand_scale(mult = c(0.002, 0)), 
+                     limits = c(-2, 102),
+                     breaks = 0:4 * 25) +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.002)),
+                     limits = c(-5, 1000),
+                     breaks = 0:5 * 200,
+                     labels = scales::comma) +
+  scale_radius(range = c(3, 12),
+               breaks = c(1, 2, 4),
+               labels = c("1", "2-3", "4-5")) +
+  labs(x = "AFFH School Quality Index",
+       y = "Number of LIHTC units") +
+  scatter_grid() +
+  geom_smooth(method=lm, se=FALSE, size=1, alpha = 0.5, color = "#1696d2",
+              linetype = "dashed") + 
+  guides(size = guide_legend("LIHTC developments")) +
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        legend.title = element_text(face = "bold"),
+        plot.caption = element_text(hjust = 0)) + 
+  ggtitle("Figure 22. Block Groups with LIHTC (by AFFH School Quality Score)") + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, July 2020 AFFH data")) 
+
+fignew_affh
+
+```
+
+
+Next, for the share of students scoring proficient on language arts/math assessments, I categorized schools by the share of students that scored proficient (less than 25%, between 25% and 50%, between 50% and 75%, and above 75%) and calculated the minimum distance of each LIHTC development to the closest school of those four types.
+
+* More than half of LIHTC developments are within a 1/4 mile of schools where the share of students scoring proficient on a reading/language arts assessment was less than 25% (blue bar, first column).
+
+* Alternatively, more than half of LIHTC developments are more than 1.5 miles away from schools where more than 75% of students scored proficient (green bar, last column).
+
+
+```{r dist educ reading, echo =  FALSE}
+
+# find minimum distance
+
+reading_below25 <- educ_data_appended %>%
+  select(perc_at_reading) %>%
+  filter(perc_at_reading == "Less than 25%")
+
+reading_25to50 <- educ_data_appended %>%
+  select(perc_at_reading) %>%
+  filter(perc_at_reading == "Between 25% and 50%")
+
+reading_50to75 <- educ_data_appended %>%
+  select(perc_at_reading) %>%
+  filter(perc_at_reading == "Between 50% and 75%")
+
+reading_75above <- educ_data_appended %>%
+  select(perc_at_reading) %>%
+  filter(perc_at_reading == "Above 75%")
+
+mindist_readingbelow25 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(reading_below25) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Share of students less than 25%",
+         min_dist = min_dist * 0.00062137)
+
+mindist_reading25to50 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(reading_25to50) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Share of students between 25% and 50%",
+         min_dist = min_dist * 0.00062137)
+
+mindist_reading50to75 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(reading_50to75) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Share of students between 50% and 75%",
+         min_dist = min_dist * 0.00062137)
+
+mindist_above75 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(reading_75above) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Share of students above 75%",
+         min_dist = min_dist * 0.00062137)
+
+
+reading <- mindist_readingbelow25 %>%
+  rbind(mindist_reading25to50, mindist_reading50to75, mindist_above75) %>%
+  mutate(dist_type = case_when(min_dist < 0.25 ~ "Less than 1/4 mile",
+                               min_dist >= 0.25 & min_dist < 0.5 ~ "Between 1/4 and 1/2 mile",
+                               min_dist >= 0.5 & min_dist < 0.75 ~ "Between 1/2 and 3/4 mile",
+                               min_dist >=0.75 & min_dist < 1 ~ "Between 3/4 and 1 mile",
+                               min_dist >= 1 & min_dist < 1.5 ~ "Between 1 and 1.5 miles",
+                               min_dist >= 1.5 ~ "Greater than 1.5 miles"),
+         dist_type = factor(dist_type, levels = c("Less than 1/4 mile", "Between 1/4 and 1/2 mile",
+                                                  "Between 1/2 and 3/4 mile", 
+                                                  "Between 3/4 and 1 mile",
+                                                  "Between 1 and 1.5 miles",
+                                                  "Greater than 1.5 miles")),
+         type = factor(type, levels = c("Share of students less than 25%", 
+                                        "Share of students between 25% and 50%",
+                                        "Share of students between 50% and 75%", 
+                                        "Share of students above 75%"))) %>%
+  ggplot() +
+  geom_bar(mapping = aes(x = type, fill = forcats::fct_rev(dist_type)), position = "fill") +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)), labels = scales::percent) +
+  labs(x = "Schools by share of students scoring proficient on a reading or language arts assessment",
+       y = "Share of LIHTC developments") +  
+  remove_ticks() +
+  guides(color = FALSE) + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 12)) + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  labs(caption = bquote(bold("Source:")~"Urban Institute Education Data Portal, HUD LIHTC database")) + 
+  scale_fill_manual(values = c("#55b748", "#ec008b", "#fdbf11", "#000000", "#d2d2d2", "#1696d2")) + 
+  ggtitle("Figure 23. Minimum Distance of LIHTC Developments to Schools\nby Share of Students Scoring Proficient on Reading Assessment")
+
+
+reading
+
+
+```
+
+* Trends are similar when considering proficiency on math assessments.
+
+
+```{r dist educ math, echo =  FALSE}
+
+# find minimum distance
+
+math_below25 <- educ_data_appended %>%
+  select(perc_at_math) %>%
+  filter(perc_at_math == "Less than 25%")
+
+math_25to50 <- educ_data_appended %>%
+  select(perc_at_math) %>%
+  filter(perc_at_math == "Between 25% and 50%")
+
+math_50to75 <- educ_data_appended %>%
+  select(perc_at_math) %>%
+  filter(perc_at_math == "Between 50% and 75%")
+
+math_75above <- educ_data_appended %>%
+  select(perc_at_math) %>%
+  filter(perc_at_math == "Above 75%")
+
+mindist_mathbelow25 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(math_below25) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Share of students less than 25%",
+         min_dist = min_dist * 0.00062137)
+
+mindist_math25to50 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(math_25to50) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Share of students between 25% and 50%",
+         min_dist = min_dist * 0.00062137)
+
+mindist_math50to75 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(math_50to75) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Share of students between 50% and 75%",
+         min_dist = min_dist * 0.00062137)
+
+mindist_mathabove75 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(math_75above) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Share of students above 75%",
+         min_dist = min_dist * 0.00062137)
+
+
+math <- mindist_mathbelow25 %>%
+  rbind(mindist_math25to50, mindist_math50to75, mindist_mathabove75) %>%
+  mutate(dist_type = case_when(min_dist < 0.25 ~ "Less than 1/4 mile",
+                               min_dist >= 0.25 & min_dist < 0.5 ~ "Between 1/4 and 1/2 mile",
+                               min_dist >= 0.5 & min_dist < 0.75 ~ "Between 1/2 and 3/4 mile",
+                               min_dist >=0.75 & min_dist < 1 ~ "Between 3/4 and 1 mile",
+                               min_dist >= 1 & min_dist < 1.5 ~ "Between 1 and 1.5 miles",
+                               min_dist >= 1.5 ~ "Greater than 1.5 miles"),
+         dist_type = factor(dist_type, levels = c("Less than 1/4 mile", "Between 1/4 and 1/2 mile",
+                                                  "Between 1/2 and 3/4 mile", 
+                                                  "Between 3/4 and 1 mile",
+                                                  "Between 1 and 1.5 miles",
+                                                  "Greater than 1.5 miles")),
+         type = factor(type, levels = c("Share of students less than 25%", 
+                                        "Share of students between 25% and 50%",
+                                        "Share of students between 50% and 75%", 
+                                        "Share of students above 75%"))) %>%
+  ggplot() +
+  geom_bar(mapping = aes(x = type, fill = forcats::fct_rev(dist_type)), position = "fill") +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)), labels = scales::percent) +
+  labs(x = "Schools by share of students scoring proficient on a mathematics assessment",
+       y = "Share of LIHTC developments") +  
+  remove_ticks() +
+  guides(color = FALSE) + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 12)) + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  labs(caption = bquote(bold("Source:")~"Urban Institute Education Data Portal, HUD LIHTC database")) + 
+  scale_fill_manual(values = c("#55b748", "#ec008b", "#fdbf11", "#000000", "#d2d2d2", "#1696d2")) + 
+  ggtitle("Figure 24. Minimum Distance of LIHTC Developments to Schools\nby Share of Students Scoring Proficient on Math Assessment")
+
+
+math
+
+
+```
+
+I then calculated minimum distance to high schools by their five-year graduation rate.
+
+* LIHTC developments are generally closer to high schools with higher graduation rates than to high schools with lower graduation rates.
+
+
+```{r dist educ grad, echo =  FALSE}
+
+# find minimum distance
+
+grad_below50 <- educ_data_appended %>%
+  select(five_yr_grad_recode) %>%
+  filter(five_yr_grad_recode == "Less than 50%")
+
+grad_50to75 <- educ_data_appended %>%
+  select(five_yr_grad_recode) %>%
+  filter(five_yr_grad_recode == "Between 50% and 75%")
+
+grad_75above <- educ_data_appended %>%
+  select(five_yr_grad_recode) %>%
+  filter(five_yr_grad_recode == "Above 75%")
+
+mindist_gradbelow50 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(grad_below50) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Rate less than 50%",
+         min_dist = min_dist * 0.00062137)
+
+mindist_grad50to75 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(grad_50to75) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Rate between 50% and 75%",
+         min_dist = min_dist * 0.00062137)
+
+mindist_gradabove75 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(grad_75above) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Rate above 75%",
+         min_dist = min_dist * 0.00062137)
+
+grad <- mindist_gradbelow50 %>%
+  rbind(mindist_grad50to75, mindist_gradabove75) %>%
+  mutate(dist_type = case_when(min_dist < 0.25 ~ "Less than 1/4 mile",
+                               min_dist >= 0.25 & min_dist < 0.5 ~ "Between 1/4 and 1/2 mile",
+                               min_dist >= 0.5 & min_dist < 0.75 ~ "Between 1/2 and 3/4 mile",
+                               min_dist >=0.75 & min_dist < 1 ~ "Between 3/4 and 1 mile",
+                               min_dist >= 1 & min_dist < 1.5 ~ "Between 1 and 1.5 miles",
+                               min_dist >= 1.5 ~ "Greater than 1.5 miles"),
+         dist_type = factor(dist_type, levels = c("Less than 1/4 mile", "Between 1/4 and 1/2 mile",
+                                                  "Between 1/2 and 3/4 mile", 
+                                                  "Between 3/4 and 1 mile",
+                                                  "Between 1 and 1.5 miles",
+                                                  "Greater than 1.5 miles")),
+         type = factor(type, levels = c("Rate less than 50%", "Rate between 50% and 75%", "Rate above 75%"))) %>%
+  ggplot() +
+  geom_bar(mapping = aes(x = type, fill = forcats::fct_rev(dist_type)), position = "fill") +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)), labels = scales::percent) +
+  labs(x = "High schools by five-year graduation rate",
+       y = "Share of LIHTC developments") +  
+  remove_ticks() +
+  guides(color = FALSE) + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 12)) + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  labs(caption = bquote(bold("Source:")~"OSSE 2021 DC School Report Card, HUD LIHTC database")) + 
+  scale_fill_manual(values = c("#55b748", "#ec008b", "#fdbf11", "#000000", "#d2d2d2", "#1696d2")) + 
+  ggtitle("Figure 25. Minimum Distance of LIHTC Developments to Schools\nby Five-Year Graduaton Rate")
+
+grad
+
+```
+
+* Lastly, LIHTC developments are generally farther away from high schools with a 12-month post-secondary enrollment rate above 75% than they are to high schools with lower enrollment rates.
+
+
+```{r dist educ enroll, echo =  FALSE}
+
+# find minimum distance
+
+enroll_below50 <- educ_data_appended %>%
+  select(enroll_recode) %>%
+  filter(enroll_recode == "Less than 50%")
+
+enroll_50to75 <- educ_data_appended %>%
+  select(enroll_recode) %>%
+  filter(enroll_recode == "Between 50% and 75%")
+
+enroll_75above <- educ_data_appended %>%
+  select(enroll_recode) %>%
+  filter(enroll_recode == "Above 75%")
+
+mindist_enrollbelow50 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(enroll_below50) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Rate less than 50%",
+         min_dist = min_dist * 0.00062137)
+
+mindist_enroll50to75 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(enroll_50to75) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Rate between 50% and 75%",
+         min_dist = min_dist * 0.00062137)
+
+mindist_enrollabove75 <- lihtc_nomissing %>%
+  select(HUD_ID, LI_UNITS) %>%
+  st_distance(enroll_75above) %>%
+  as_tibble() %>%
+  mutate(min_dist = pmap_dbl(., min)) %>%
+  select(min_dist) %>%
+  mutate(n = row_number(),
+         type = "Rate above 75%",
+         min_dist = min_dist * 0.00062137)
+
+enroll <- mindist_enrollbelow50 %>%
+  rbind(mindist_enroll50to75, mindist_enrollabove75) %>%
+  mutate(dist_type = case_when(min_dist < 0.25 ~ "Less than 1/4 mile",
+                               min_dist >= 0.25 & min_dist < 0.5 ~ "Between 1/4 and 1/2 mile",
+                               min_dist >= 0.5 & min_dist < 0.75 ~ "Between 1/2 and 3/4 mile",
+                               min_dist >=0.75 & min_dist < 1 ~ "Between 3/4 and 1 mile",
+                               min_dist >= 1 & min_dist < 1.5 ~ "Between 1 and 1.5 miles",
+                               min_dist >= 1.5 ~ "Greater than 1.5 miles"),
+         dist_type = factor(dist_type, levels = c("Less than 1/4 mile", "Between 1/4 and 1/2 mile",
+                                                  "Between 1/2 and 3/4 mile", 
+                                                  "Between 3/4 and 1 mile",
+                                                  "Between 1 and 1.5 miles",
+                                                  "Greater than 1.5 miles")),
+         type = factor(type, levels = c("Rate less than 50%", "Rate between 50% and 75%", "Rate above 75%"))) %>%
+  ggplot() +
+  geom_bar(mapping = aes(x = type, fill = forcats::fct_rev(dist_type)), position = "fill") +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)), labels = scales::percent) +
+  labs(x = "High schools by 12-month post-secondary enrollment rate (2018-2019 graduates)",
+       y = "Share of LIHTC developments") +  
+  remove_ticks() +
+  guides(color = FALSE) + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 12)) + 
+  theme(legend.box = "vertical", legend.position = "right",
+        legend.direction = "vertical",
+        plot.caption = element_text(hjust = 0)) + 
+  labs(caption = bquote(bold("Source:")~"OSSE 2021 DC School Report Card, HUD LIHTC database")) + 
+  scale_fill_manual(values = c("#55b748", "#ec008b", "#fdbf11", "#000000", "#d2d2d2", "#1696d2")) + 
+  ggtitle("Figure 26. Minimum Distance of LIHTC Developments to Schools\nby 12-Month Post-Secondary Enrollment Rate")
+
+enroll
+
+```
+
+
+## Other Outcomes/Indicators
+
+The group voiced household wealth as a measure to look into. I was not able to find data available at a small enough of a geography to track household wealth in LIHTC developments.
+
+Instead, I mapped a few AFFH opportunity indices with the location of LIHTC developments.
+
+
+**AFFH Low Poverty Index**: Measures neighborhood poverty. The higher the value, the less exposure to poverty.
+
+* LIHTC developments are generally located in areas with higher poverty rates.
+
+```{r affh_indices_pov, echo =  FALSE}
+
+set_urbn_defaults(style = "map")
+
+# FIGURE: AFFH poverty
+
+fig_affh_pov <- ggplot() +
+  geom_sf(data = dc_tracts_2019_affh, aes(fill = pov_idx)) + 
+  scale_fill_gradientn(
+    name = "Low Poverty Index",
+    limits = c(0,100),
+    na.value = "#dcdbdb"
+  ) + 
+  geom_sf(data = dc_wards, color = "white", fill = "transparent", size = 1.5) + 
+  geom_sf(
+    data = lihtc_nomissing,
+    # Size bubbles by number of LIHTC units
+    aes(size = LI_UNITS),
+    fill = palette_urbn_main["green"],
+    color = "black",
+    # Adjust transparency for readability
+    alpha = 0.5,
+    shape = 21
+  ) + 
+  guides(size = guide_legend("LIHTC units")) + 
+  theme(legend.direction = "vertical", legend.box = "vertical",
+        plot.caption = element_text(hjust = 0),
+        legend.title = element_text(face = "bold")) + 
+  ggtitle("Figure 27. AFFH Low Poverty Index and LIHTC") + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, July 2020 AFFH data, 2019 tract boundaries"))
+
+fig_affh_pov
+
+```
+
+**AFFH Labor Market Engagement Index**: Measures labor market engagement and human capital in a neighborhood. The higher the value, the higher the labor force participation and human capital.  
+
+* LIHTC developments are generally located in areas with lower levels of labor force participation and human capital.
+
+```{r affh_indices_labor, echo =  FALSE}
+
+set_urbn_defaults(style = "map")
+
+# FIGURE: AFFH labor
+
+fig_affh_labor <- ggplot() +
+  geom_sf(data = dc_tracts_2019_affh, aes(fill = lbr_idx)) + 
+  scale_fill_gradientn(
+    name = "Labor Market\nEngagement Index",
+    limits = c(0,100),
+    na.value = "#dcdbdb"
+  ) + 
+  geom_sf(data = dc_wards, color = "white", fill = "transparent", size = 1.5) + 
+  geom_sf(
+    data = lihtc_nomissing,
+    # Size bubbles by number of LIHTC units
+    aes(size = LI_UNITS),
+    fill = palette_urbn_main["green"],
+    color = "black",
+    # Adjust transparency for readability
+    alpha = 0.5,
+    shape = 21
+  ) + 
+  guides(size = guide_legend("LIHTC units")) + 
+  theme(legend.direction = "vertical", legend.box = "vertical",
+        plot.caption = element_text(hjust = 0),
+        legend.title = element_text(face = "bold")) + 
+  ggtitle("Figure 28. AFFH Labor Market Engagement Index and LIHTC") + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, July 2020 AFFH data, 2019 tract boundaries"))
+
+fig_affh_labor
+
+```
+
+
+**AFFH Low Transportation Cost Index**: Measures transportation costs for a 3-person single-parent family with income at 50% of median income for renters (pegged regionally - CBSA). The higher the value, the lower the cost of transportation.
+
+* LIHTC developments (as well as the District as a whole) are located in areas with lower transportation costs.
+
+```{r affh_indices_low, echo =  FALSE}
+
+set_urbn_defaults(style = "map")
+
+# FIGURE: AFFH low transportation
+
+fig_affh_low <- ggplot() +
+  geom_sf(data = dc_tracts_2019_affh, aes(fill = tcost_idx)) + 
+  scale_fill_gradientn(
+    name = "Low Transportation\nCost Index",
+    limits = c(0,100),
+    na.value = "#dcdbdb"
+  ) + 
+  geom_sf(data = dc_wards, color = "white", fill = "transparent", size = 1.5) + 
+  geom_sf(
+    data = lihtc_nomissing,
+    # Size bubbles by number of LIHTC units
+    aes(size = LI_UNITS),
+    fill = palette_urbn_main["green"],
+    color = "black",
+    # Adjust transparency for readability
+    alpha = 0.5,
+    shape = 21
+  ) + 
+  guides(size = guide_legend("LIHTC units")) + 
+  theme(legend.direction = "vertical", legend.box = "vertical",
+        plot.caption = element_text(hjust = 0),
+        legend.title = element_text(face = "bold")) + 
+  ggtitle("Figure 29. AFFH Low Transportation Cost Index and LIHTC") + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, July 2020 AFFH data, 2019 tract boundaries"))
+
+fig_affh_low
+
+```
+
+
+**AFFH Transit Trips Index**: Measures number of transit trips taken by a 3-person single-parent family with income at 50% of median income for renters (pegged regionally - CBSA). The higher the value, the more likely residents utilize public transit.
+
+* LIHTC developments (as well as the District as a whole) are located in areas with a high utilization of public transit.
+
+
+```{r affh_indices_transit, echo =  FALSE}
+
+set_urbn_defaults(style = "map")
+
+# FIGURE: AFFH transit
+
+fig_affh_transit <- ggplot() +
+  geom_sf(data = dc_tracts_2019_affh, aes(fill = trans_idx)) + 
+  scale_fill_gradientn(
+    name = "Transit Trips Index",
+    limits = c(0,100),
+    na.value = "#dcdbdb"
+  ) + 
+  geom_sf(data = dc_wards, color = "white", fill = "transparent", size = 1.5) + 
+  geom_sf(
+    data = lihtc_nomissing,
+    # Size bubbles by number of LIHTC units
+    aes(size = LI_UNITS),
+    fill = palette_urbn_main["green"],
+    color = "black",
+    # Adjust transparency for readability
+    alpha = 0.5,
+    shape = 21
+  ) + 
+  guides(size = guide_legend("LIHTC units")) + 
+  theme(legend.direction = "vertical", legend.box = "vertical",
+        plot.caption = element_text(hjust = 0),
+        legend.title = element_text(face = "bold")) + 
+  ggtitle("Figure 30. AFFH Transit Trips Index and LIHTC") + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, July 2020 AFFH data, 2019 tract boundaries"))
+
+fig_affh_transit
+
+```
+
+
+**AFFH Environmental Health Index**: Measures the potential exposure to harmful toxins (EPA estimates of air quality carcinogenic, respiratory, and neurological hazards). The higher the value, the less exposure to harmful toxins.
+
+* LIHTC developments (as well as the District as a whole) are located in areas with higher exposure to environmental toxins.
+
+```{r affh_indices_envir, echo =  FALSE}
+
+set_urbn_defaults(style = "map")
+
+# FIGURE: AFFH environmental
+
+fig_affh_envir <- ggplot() +
+  geom_sf(data = dc_tracts_2019_affh, aes(fill = haz_idx)) + 
+  scale_fill_gradientn(
+    name = "Environmental\nHealth Index",
+    limits = c(0,100),
+    na.value = "#dcdbdb"
+  ) + 
+  geom_sf(data = dc_wards, color = "white", fill = "transparent", size = 1.5) + 
+  geom_sf(
+    data = lihtc_nomissing,
+    # Size bubbles by number of LIHTC units
+    aes(size = LI_UNITS),
+    fill = palette_urbn_main["green"],
+    color = "black",
+    # Adjust transparency for readability
+    alpha = 0.5,
+    shape = 21
+  ) + 
+  guides(size = guide_legend("LIHTC units")) + 
+  theme(legend.direction = "vertical", legend.box = "vertical",
+        plot.caption = element_text(hjust = 0),
+        legend.title = element_text(face = "bold")) + 
+  ggtitle("Figure 31. AFFH Environmental Health Index and LIHTC") + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, July 2020 AFFH data, 2019 tract boundaries"))
+
+fig_affh_envir
+
+```
+
+## Value of Land
+
+Understanding the value of land in the District can be [administratively difficult](https://www.dcpolicycenter.org/publications/land-value-tax/). Given those difficulties, I used the Integrated Tax System Public Extract's Square, Suffix, Lot (SSL) total assessment value, which combines the value of the land and the building.
+
+Here are the steps I took:
+
+* I **summed** the assessed value of **Lots** for each **Square** in the District and, by Ward, mapped those to a boxplot. The boxplot shows the 25th percentile, 50th percentile, and 75th percentile of the total assessed value (land + building) of Squares in the District.
+
+* The **points** I added to the boxplot are Squares with LIHTC developments, to be able to compare the assessed value of Squares containing LIHTC to the assessed value of all Squares in each Ward (the boxplot).
+
+The analysis shows:
+
+* SSL Squares in Wards 2, 1, and 6 on average have higher assessed values than Squares in othe Wards.
+
+* Squares with LIHTC (the points) generally have higher assessed values than other Squares in their Wards - many are greater than the 75th percentile (the far right of the rectangle).
+
+
+```{r land value, echo =  FALSE}
+
+# var is ASSESSMENT, which includes property and land
+set_urbn_defaults(style = "print")
+
+my_pal <- c("#1696d2", "#d2d2d2", "#000000", "#fdbf11", 
+            "#ec008b", "#55b748", "#5c5859", "#db2b27")
+
+# FIGURE: assessment by LIHTC
+g <- assessment_data_lihtc_Ward %>%
+  #filter(NAME %in% c("Ward 1", "Ward 2", "Ward 3", "Ward 4")) %>%
+  ggplot(aes(x = forcats::fct_rev(NAME), y = assessment, 
+                 color = NAME, fill = NAME)) +
+  geom_boxplot(
+    width = 0.5, fill = "white",
+    size = 1, outlier.shape = NA
+  ) +
+  gghalves::geom_half_point(
+    data = ~filter(.x, LIHTC==1),
+    side = "l",
+    range_scale = .3,
+    alpha = .5, size = 2
+  ) +
+  coord_flip() +
+  scale_x_discrete(expand = c(.02, .02)) +
+  scale_color_manual(values = my_pal, guide = "none") +
+  scale_fill_manual(values = my_pal, guide = "none") +
+  scale_y_continuous(limits = c(0, 750000000),
+                     labels = scales::dollar,
+                     breaks = 0:7 * 100000000) + 
+  labs(x = NULL,
+       y = "Total assessed value of squares (total of land and building)") + 
+  theme(legend.direction = "vertical", legend.box = "vertical",
+        plot.caption = element_text(hjust = 0),
+        legend.title = element_text(face = "bold")) + 
+  ggtitle("Figure 32. Assessed Value (Land and Building) of SSL Squares",
+          subtitle = "Points Are Squares Containing LIHTC") + 
+  labs(caption = bquote(bold("Source:")~"HUD LIHTC database, Integrated Tax System Public Extract"))
+
+g
+
+```
+
+
+## Overnight Bus Routes
+
+DC Act 24-793 [notes](https://lims.dccouncil.gov/Legislation/B24-0429) "daily 24-hour Metrobus service on at least 12 Metrobus lines in the District, with a maximum of 20 minutes between any scheduled bus arrival at any stop."
+
+Unfortunately, after browsing news articles and WMATA's API, I have not see preliminary statements of what those bus routes might be. If you all learn which bus routes they represent, I'd be happy to go back and determine their co-location with LIHTC developments.
+
+
+
