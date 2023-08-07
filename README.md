@@ -42,3 +42,6 @@ Tools
 # Results
 
 The knitted results are publicly available [here](https://mattgerken.github.io/DC-LIHTC-Portfolio/).
+
+![moi](https://github.com/mattgerken/DC-LIHTC-Portfolio/assets/69599248/e2f7cab0-9a7f-474f-a2f6-01a92813192b)
+
